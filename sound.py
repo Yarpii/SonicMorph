@@ -22,6 +22,9 @@ uniform mat4 model;
 uniform mat4 view;
 uniform mat4 projection;
 
+out vec3 fragNormal;
+out vec3 fragPosition;
+
 // Base parametric equations
 vec3 createSphere(vec2 p) {
     float u = p.x * 2.0 * 3.14159;
@@ -60,29 +63,29 @@ vec3 createFlower(vec2 p) {
 vec3 createSquare(vec2 p) {
     float u = p.x * 2.0 - 1.0;  // Map to [-1,1]
     float v = p.y * 2.0 - 1.0;  // Map to [-1,1]
-    
+
     // Create a rounded square using smoothing
     float r = 0.9;  // Size of square
     float smoothFactor = 0.1;  // Smoothing factor
-    
+
     // Smooth max function for corners
     float x = u < 0.0 ? -max(abs(u), smoothFactor) : max(abs(u), smoothFactor);
     float z = v < 0.0 ? -max(abs(v), smoothFactor) : max(abs(v), smoothFactor);
     float y = 0.0;  // Flat square initially
-    
+
     // Add wave deformation to the square
     y = amplitude * sin(frequency * 10.0 * (u*u + v*v) - time);
-    
+
     return vec3(x, y, z);
 }
 
 vec3 createSpiral(vec2 p) {
     float u = p.x * 10.0 * 3.14159;  // More loops
     float v = p.y;
-    
+
     float r = 0.1 + v * 0.9;  // Radius increases from center to edge
     float height = (v - 0.5) * 2.0;  // Height from -1 to 1
-    
+
     return vec3(
         r * cos(u + twist * height * 5.0),
         height,
@@ -94,7 +97,7 @@ void main() {
     // Get base shape based on selected type
     vec3 basePos;
     vec3 morphPos;
-    
+
     // First shape (based on shapeType)
     if (shapeType == 0) {
         basePos = createSphere(position);
@@ -109,7 +112,7 @@ void main() {
     } else {
         basePos = createSphere(position);  // Default
     }
-    
+
     // Calculate the next shape for morphing
     int nextShape = (shapeType + 1) % 5;
     if (nextShape == 0) {
@@ -125,13 +128,13 @@ void main() {
     } else {
         morphPos = createSphere(position);
     }
-    
+
     // Blend between shapes using the morph factor
     vec3 finalPos = mix(basePos, morphPos, morphFactor);
-    
+
     // Apply frequency-based deformation
     finalPos += amplitude * 0.3 * sin(frequency * 2.0 * finalPos.x + time) * vec3(0.0, 1.0, 0.0);
-    
+
     // Apply a twist based on height and time
     float twistAmount = twist * sin(time * 0.5);
     float cosT = cos(twistAmount * finalPos.y);
@@ -140,9 +143,14 @@ void main() {
         finalPos.x * cosT - finalPos.z * sinT,
         finalPos.x * sinT + finalPos.z * cosT
     );
-    
+
+    // Approximate a normal from the deformed position to support lighting
+    vec3 normal = normalize(finalPos);
+    fragNormal = normalize((view * model * vec4(normal, 0.0)).xyz);
+    fragPosition = (view * model * vec4(finalPos, 1.0)).xyz;
+
     // Position in 3D space with animation
-    gl_Position = projection * view * model * vec4(finalPos, 1.0);
+    gl_Position = projection * vec4(fragPosition, 1.0);
 }
 """
 
@@ -156,25 +164,37 @@ out vec4 fragColor;
 uniform vec3 lightPos;
 uniform vec3 viewPos;
 uniform vec3 baseColor;
+uniform vec3 fftBands;
 uniform float time;
 uniform float frequency;
 uniform float energy;
 
 void main() {
-    // Color based on position for more interesting visuals
+    vec3 N = normalize(fragNormal);
+    vec3 L = normalize(lightPos - fragPosition);
+    vec3 V = normalize(viewPos - fragPosition);
+    vec3 R = reflect(-L, N);
+
+    float diff = max(dot(N, L), 0.0);
+    float spec = pow(max(dot(R, V), 0.0), 16.0);
+
     vec3 color = baseColor;
     color = color * (0.7 + 0.3 * sin(fragPosition.y * 3.0 + time));
-    
-    // Add frequency-dependent color modulation
-    color.r += 0.2 * sin(time * 0.3 + frequency * 0.01);
-    color.g += 0.2 * sin(time * 0.5 + frequency * 0.02);
-    color.b += 0.2 * sin(time * 0.7 + frequency * 0.03);
-    
+
+    // Add frequency-dependent color modulation enhanced by FFT bands
+    color.r += 0.25 * fftBands.r * sin(time * 0.4 + frequency * 0.02);
+    color.g += 0.25 * fftBands.g * sin(time * 0.5 + frequency * 0.03);
+    color.b += 0.25 * fftBands.b * sin(time * 0.6 + frequency * 0.04);
+
     // Energy pulsation effect
     float pulse = 0.8 + 0.2 * sin(time * 5.0) + energy * 0.3;
     color *= pulse;
-    
-    fragColor = vec4(color, 1.0);
+
+    vec3 ambient = 0.25 * color;
+    vec3 diffuse = 0.65 * diff * color;
+    vec3 specular = 0.15 * spec * vec3(1.0, 1.0, 1.0);
+
+    fragColor = vec4(ambient + diffuse + specular, 1.0);
 }
 """
 
@@ -227,8 +247,13 @@ class SoundShapeVisualizer:
         self.amplitude = 0.5
         self.energy = 0.0
         self.morph_factor = 0.0
+        self.morph_target = 0.0
+        self.morph_smoothing = 3.0
         self.twist = 0.0
-        
+        self.fft_bands = np.zeros(3, dtype=np.float32)
+        self.smoothed_bands = np.zeros(3, dtype=np.float32)
+        self.current_wave = np.zeros(1, dtype=np.float32)
+
         # Shape parameters
         self.shape_type = 0  # 0=sphere, 1=torus, 2=flower, 3=square, 4=spiral
         self.shape_names = ["Sphere", "Torus", "Flower", "Square", "Spiral"]
@@ -236,6 +261,7 @@ class SoundShapeVisualizer:
         self.morph_speed = 0.2
         self.auto_rotate = True
         self.rotation_speed = 0.5
+        self.auto_orbit = True
         
         # Visual settings
         self.resolution = 50  # Grid resolution
@@ -369,7 +395,7 @@ class SoundShapeVisualizer:
     def generate_waveform(self, freq, duration=1.0):
         """Generate a waveform for audio playback."""
         t = np.linspace(0, duration, int(self.sample_rate * duration), endpoint=False)
-        
+
         # Create a complex waveform based on the current shape
         if self.shape_type == 0:  # Sphere - pure sine wave
             wave = self.amplitude * np.sin(2 * np.pi * freq * t)
@@ -397,13 +423,41 @@ class SoundShapeVisualizer:
         if decay > 0 and decay < len(envelope):
             decay_start = len(envelope) - decay
             envelope[decay_start:] = np.linspace(1, 0, decay)
-        
+
         wave = wave * envelope
-        
+
         # Calculate energy for visualization
         self.energy = np.mean(np.abs(wave)) * 2
-        
+        self.current_wave = wave.astype(np.float32)
+        self.update_fft_bands(self.current_wave)
+
         return (wave * 32767).astype(np.int16)
+
+    def compute_fft_bands(self, wave):
+        """Compute smoothed low/mid/high FFT magnitudes for the given waveform."""
+        if wave.size == 0:
+            return np.zeros(3, dtype=np.float32)
+
+        spectrum = np.abs(np.fft.rfft(wave))
+        freqs = np.fft.rfftfreq(wave.size, 1 / self.sample_rate)
+
+        bands = np.zeros(3, dtype=np.float32)
+        ranges = [(0, 200), (200, 800), (800, 2000)]
+        for idx, (low, high) in enumerate(ranges):
+            mask = (freqs >= low) & (freqs < high)
+            if np.any(mask):
+                bands[idx] = float(np.sqrt(np.mean(spectrum[mask] ** 2)))
+
+        # Normalize to keep values within a pleasant range
+        max_band = np.max(bands) if np.max(bands) > 0 else 1.0
+        return (bands / max_band).astype(np.float32)
+
+    def update_fft_bands(self, wave):
+        """Update and smooth the FFT band magnitudes."""
+        raw_bands = self.compute_fft_bands(wave)
+        smoothing = 0.85
+        self.smoothed_bands = smoothing * self.smoothed_bands + (1 - smoothing) * raw_bands
+        self.fft_bands = self.smoothed_bands
     
     def update_sound(self):
         """Update the currently playing sound."""
@@ -428,7 +482,12 @@ class SoundShapeVisualizer:
         except Exception as e:
             print(f"Sound error: {e}")
             self.sound_playing = False
-    
+
+    @staticmethod
+    def smooth_step(current, target, delta_time, speed):
+        """Smoothly move current toward target based on elapsed time."""
+        return current + (target - current) * min(1.0, delta_time * speed)
+
     def handle_input(self, delta_time):
         """Process user input."""
         # Frequency controls
@@ -461,7 +520,7 @@ class SoundShapeVisualizer:
             morph_change = -0.01
 
         if morph_change != 0:
-            self.morph_factor = max(0.0, min(1.0, self.morph_factor + morph_change))
+            self.morph_target = max(0.0, min(1.0, self.morph_target + morph_change))
 
         # Twist controls
         twist_change = 0
@@ -499,16 +558,27 @@ class SoundShapeVisualizer:
         """Update the visualization state."""
         # Auto-rotate camera if enabled
         if self.auto_rotate:
-            self.camera_angle += delta_time * self.rotation_speed
-            self.update_camera_position()
-        
+            band_spin = self.fft_bands[1] * 0.5
+            self.camera_angle += delta_time * (self.rotation_speed + band_spin)
+
+        if self.auto_orbit:
+            target_height = 0.3 + 0.8 * float(self.fft_bands[0])
+            target_distance = 2.8 + 0.8 * float(self.fft_bands[2])
+            self.camera_height = self.smooth_step(self.camera_height, target_height, delta_time, 2.0)
+            self.camera_distance = self.smooth_step(self.camera_distance, target_distance, delta_time, 2.0)
+
+        self.update_camera_position()
+
         # Auto-morph between shapes if enabled
         if self.auto_morph:
-            self.morph_factor += delta_time * self.morph_speed
-            if self.morph_factor >= 1.0:
-                self.morph_factor = 0.0
-                self.shape_type = (self.shape_type + 1) % len(self.shape_names)
-                self.update_sound()  # Update sound to match new shape
+            self.morph_target = 1.0
+        self.morph_factor = self.smooth_step(self.morph_factor, self.morph_target, delta_time, self.morph_smoothing)
+
+        if self.auto_morph and self.morph_factor >= 0.99:
+            self.morph_factor = 0.0
+            self.morph_target = 0.0
+            self.shape_type = (self.shape_type + 1) % len(self.shape_names)
+            self.update_sound()  # Update sound to match new shape
     
     def render(self):
         """Render the visualization."""
@@ -518,10 +588,10 @@ class SoundShapeVisualizer:
         
         # Use shader program
         glUseProgram(self.shader)
-        
+
         # Set uniforms
         current_time = time.time() - self.start_time
-        
+
         time_loc = glGetUniformLocation(self.shader, "time")
         glUniform1f(time_loc, current_time)
         
@@ -538,18 +608,28 @@ class SoundShapeVisualizer:
         glUniform1f(morph_loc, self.morph_factor)
         
         twist_loc = glGetUniformLocation(self.shader, "twist")
-        glUniform1f(twist_loc, self.twist)
-        
+        twist_value = self.twist + 1.5 * float(self.fft_bands[2])
+        glUniform1f(twist_loc, twist_value)
+
         energy_loc = glGetUniformLocation(self.shader, "energy")
         glUniform1f(energy_loc, self.energy)
-        
+
         color_loc = glGetUniformLocation(self.shader, "baseColor")
         glUniform3fv(color_loc, 1, self.base_color)
-        
+
+        band_loc = glGetUniformLocation(self.shader, "fftBands")
+        glUniform3fv(band_loc, 1, self.fft_bands)
+
+        light_loc = glGetUniformLocation(self.shader, "lightPos")
+        glUniform3fv(light_loc, 1, np.array([2.5, 2.5, 2.5], dtype=np.float32))
+
         # Set view matrix
         view = lookAt(self.camera_position, self.camera_target, self.camera_up)
         view_loc = glGetUniformLocation(self.shader, "view")
         glUniformMatrix4fv(view_loc, 1, GL_TRUE, view)
+
+        view_pos_loc = glGetUniformLocation(self.shader, "viewPos")
+        glUniform3fv(view_pos_loc, 1, self.camera_position)
         
         # Set projection matrix
         projection = perspective(45, self.width / self.height, 0.1, 100)
@@ -592,15 +672,17 @@ class SoundShapeVisualizer:
         self.draw_text(10, self.height - 80, f"Amplitude: {self.amplitude:.2f}")
         self.draw_text(10, self.height - 100, f"Morph: {self.morph_factor:.2f}")
         self.draw_text(10, self.height - 120, f"Twist: {self.twist:.1f}")
+        self.draw_text(10, self.height - 140, "FFT Low/Mid/High: {:.2f}/{:.2f}/{:.2f}".format(*self.fft_bands))
+        self.draw_text(10, self.height - 160, f"Auto-orbit: {'On' if self.auto_orbit else 'Off'}")
 
         # Controls help
-        y_pos = 140
+        y_pos = 170
         self.draw_text(10, y_pos + 100, "Controls:")
         self.draw_text(10, y_pos + 80, "↑/↓: Frequency, PgUp/PgDn: Amplitude")
         self.draw_text(10, y_pos + 60, "M/N: Manual morphing, T/Y: Twist")
         self.draw_text(10, y_pos + 40, "WASD: Camera movement, ←/→: Rotate camera")
         self.draw_text(10, y_pos + 20, "Space: Toggle sound, L: Toggle line mode")
-        self.draw_text(10, y_pos, "A: Toggle auto-morph, R: Toggle auto-rotate")
+        self.draw_text(10, y_pos, "A: Auto-morph, R: Auto-rotate, O: Auto-orbit")
 
         glEnable(GL_DEPTH_TEST)
 
@@ -670,6 +752,8 @@ class SoundShapeVisualizer:
             self.auto_morph = not self.auto_morph
         elif symbol == key.R:
             self.auto_rotate = not self.auto_rotate
+        elif symbol == key.O:
+            self.auto_orbit = not self.auto_orbit
         elif symbol == key.TAB:
             self.shape_type = (self.shape_type + 1) % len(self.shape_names)
             self.morph_factor = 0.0
