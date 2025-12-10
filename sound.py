@@ -1,232 +1,96 @@
+import argparse
 import io
+import math
 import time
 import wave
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional, Tuple
 
+import numpy as np
 import pyglet
-from pyglet.window import key
 from OpenGL.GL import *
 from OpenGL.GL.shaders import compileProgram, compileShader
-import numpy as np
 
-# Vertex shader with parametric morphing capabilities
+
 VERTEX_SHADER = """
-#version 330
-in vec2 position;  // Parametric coordinates (u,v)
-uniform float time;
-uniform float frequency;
-uniform float amplitude;
-uniform int shapeType;  // 0=sphere, 1=torus, 2=flower, 3=square, etc.
-uniform float morphFactor;  // For smooth transitions between shapes
-uniform float twist;  // For adding twists to the shape
+#version 330 core
+in vec3 position;
+in vec3 normal;
+
 uniform mat4 model;
 uniform mat4 view;
 uniform mat4 projection;
+uniform vec3 baseColor;
 
-out vec3 fragNormal;
-out vec3 fragPosition;
-
-// Base parametric equations
-vec3 createSphere(vec2 p) {
-    float u = p.x * 2.0 * 3.14159;
-    float v = p.y * 3.14159;
-    return vec3(
-        cos(u) * sin(v),
-        cos(v),
-        sin(u) * sin(v)
-    );
-}
-
-vec3 createTorus(vec2 p) {
-    float u = p.x * 2.0 * 3.14159;
-    float v = p.y * 2.0 * 3.14159;
-    float R = 0.7;  // Major radius
-    float r = 0.3;  // Minor radius
-    return vec3(
-        (R + r * cos(v)) * cos(u),
-        r * sin(v),
-        (R + r * cos(v)) * sin(u)
-    );
-}
-
-vec3 createFlower(vec2 p) {
-    float u = p.x * 2.0 * 3.14159;
-    float v = p.y * 3.14159;
-    float petals = 5.0 + amplitude * 10.0;  // Number of petals varies with amplitude
-    float r = 0.5 + 0.3 * cos(petals * u);  // Flower shape
-    return vec3(
-        r * cos(u) * sin(v),
-        cos(v),
-        r * sin(u) * sin(v)
-    );
-}
-
-vec3 createSquare(vec2 p) {
-    float u = p.x * 2.0 - 1.0;  // Map to [-1,1]
-    float v = p.y * 2.0 - 1.0;  // Map to [-1,1]
-
-    // Create a rounded square using smoothing
-    float r = 0.9;  // Size of square
-    float smoothFactor = 0.1;  // Smoothing factor
-
-    // Smooth max function for corners
-    float x = u < 0.0 ? -max(abs(u), smoothFactor) : max(abs(u), smoothFactor);
-    float z = v < 0.0 ? -max(abs(v), smoothFactor) : max(abs(v), smoothFactor);
-    float y = 0.0;  // Flat square initially
-
-    // Add wave deformation to the square
-    y = amplitude * sin(frequency * 10.0 * (u*u + v*v) - time);
-
-    return vec3(x, y, z);
-}
-
-vec3 createSpiral(vec2 p) {
-    float u = p.x * 10.0 * 3.14159;  // More loops
-    float v = p.y;
-
-    float r = 0.1 + v * 0.9;  // Radius increases from center to edge
-    float height = (v - 0.5) * 2.0;  // Height from -1 to 1
-
-    return vec3(
-        r * cos(u + twist * height * 5.0),
-        height,
-        r * sin(u + twist * height * 5.0)
-    );
-}
+out vec3 vNormal;
+out vec3 vPosition;
+out vec3 vColor;
 
 void main() {
-    // Get base shape based on selected type
-    vec3 basePos;
-    vec3 morphPos;
-
-    // First shape (based on shapeType)
-    if (shapeType == 0) {
-        basePos = createSphere(position);
-    } else if (shapeType == 1) {
-        basePos = createTorus(position);
-    } else if (shapeType == 2) {
-        basePos = createFlower(position);
-    } else if (shapeType == 3) {
-        basePos = createSquare(position);
-    } else if (shapeType == 4) {
-        basePos = createSpiral(position);
-    } else {
-        basePos = createSphere(position);  // Default
-    }
-
-    // Calculate the next shape for morphing
-    int nextShape = (shapeType + 1) % 5;
-    if (nextShape == 0) {
-        morphPos = createSphere(position);
-    } else if (nextShape == 1) {
-        morphPos = createTorus(position);
-    } else if (nextShape == 2) {
-        morphPos = createFlower(position);
-    } else if (nextShape == 3) {
-        morphPos = createSquare(position);
-    } else if (nextShape == 4) {
-        morphPos = createSpiral(position);
-    } else {
-        morphPos = createSphere(position);
-    }
-
-    // Blend between shapes using the morph factor
-    vec3 finalPos = mix(basePos, morphPos, morphFactor);
-
-    // Apply frequency-based deformation
-    finalPos += amplitude * 0.3 * sin(frequency * 2.0 * finalPos.x + time) * vec3(0.0, 1.0, 0.0);
-
-    // Apply a twist based on height and time
-    float twistAmount = twist * sin(time * 0.5);
-    float cosT = cos(twistAmount * finalPos.y);
-    float sinT = sin(twistAmount * finalPos.y);
-    finalPos.xz = vec2(
-        finalPos.x * cosT - finalPos.z * sinT,
-        finalPos.x * sinT + finalPos.z * cosT
-    );
-
-    // Approximate a normal from the deformed position to support lighting
-    vec3 normal = normalize(finalPos);
-    fragNormal = normalize((view * model * vec4(normal, 0.0)).xyz);
-    fragPosition = (view * model * vec4(finalPos, 1.0)).xyz;
-
-    // Position in 3D space with animation
-    gl_Position = projection * vec4(fragPosition, 1.0);
+    vec4 worldPos = model * vec4(position, 1.0);
+    vPosition = (view * worldPos).xyz;
+    vNormal = mat3(view * model) * normal;
+    vColor = baseColor;
+    gl_Position = projection * vec4(vPosition, 1.0);
 }
 """
 
-# Fragment shader with dynamic lighting
+
 FRAGMENT_SHADER = """
-#version 330
-in vec3 fragNormal;
-in vec3 fragPosition;
+#version 330 core
+in vec3 vNormal;
+in vec3 vPosition;
+in vec3 vColor;
+
 out vec4 fragColor;
 
 uniform vec3 lightPos;
 uniform vec3 viewPos;
-uniform vec3 baseColor;
-uniform vec3 fftBands;
-uniform float time;
-uniform float frequency;
-uniform float energy;
 
 void main() {
-    vec3 N = normalize(fragNormal);
-    vec3 L = normalize(lightPos - fragPosition);
-    vec3 V = normalize(viewPos - fragPosition);
+    vec3 N = normalize(vNormal);
+    vec3 L = normalize(lightPos - vPosition);
+    vec3 V = normalize(viewPos - vPosition);
     vec3 R = reflect(-L, N);
 
     float diff = max(dot(N, L), 0.0);
-    float spec = pow(max(dot(R, V), 0.0), 16.0);
+    float spec = pow(max(dot(R, V), 0.0), 32.0);
 
-    vec3 color = baseColor;
-    color = color * (0.7 + 0.3 * sin(fragPosition.y * 3.0 + time));
-
-    // Add frequency-dependent color modulation enhanced by FFT bands
-    color.r += 0.25 * fftBands.r * sin(time * 0.4 + frequency * 0.02);
-    color.g += 0.25 * fftBands.g * sin(time * 0.5 + frequency * 0.03);
-    color.b += 0.25 * fftBands.b * sin(time * 0.6 + frequency * 0.04);
-
-    // Energy pulsation effect
-    float pulse = 0.8 + 0.2 * sin(time * 5.0) + energy * 0.3;
-    color *= pulse;
-
-    vec3 ambient = 0.25 * color;
-    vec3 diffuse = 0.65 * diff * color;
-    vec3 specular = 0.15 * spec * vec3(1.0, 1.0, 1.0);
+    vec3 ambient = 0.15 * vColor;
+    vec3 diffuse = 0.75 * diff * vColor;
+    vec3 specular = 0.4 * spec * vec3(1.0);
 
     fragColor = vec4(ambient + diffuse + specular, 1.0);
 }
 """
 
-def lookAt(eye, center, up):
-    """Creates a view matrix using the lookAt convention."""
-    f = center - eye
-    f_norm = np.linalg.norm(f)
-    if f_norm > 0:
-        f = f / f_norm
-    
-    s = np.cross(f, up)
-    s_norm = np.linalg.norm(s)
-    if s_norm > 0:
-        s = s / s_norm
-    
-    u = np.cross(s, f)
-    
-    M = np.eye(4, dtype=np.float32)
-    M[0, :3] = s
-    M[1, :3] = u
-    M[2, :3] = -f
-    
-    T = np.eye(4, dtype=np.float32)
-    T[0, 3] = -eye[0]
-    T[1, 3] = -eye[1]
-    T[2, 3] = -eye[2]
-    
-    return M @ T
 
-def perspective(fov, aspect, near, far):
-    """Creates a perspective projection matrix."""
-    f = 1.0 / np.tan(np.radians(fov) / 2)
+def look_at(eye: np.ndarray, center: np.ndarray, up: np.ndarray) -> np.ndarray:
+    forward = center - eye
+    forward_norm = np.linalg.norm(forward)
+    if forward_norm != 0:
+        forward /= forward_norm
+
+    side = np.cross(forward, up)
+    side_norm = np.linalg.norm(side)
+    if side_norm != 0:
+        side /= side_norm
+
+    up_corrected = np.cross(side, forward)
+
+    m = np.eye(4, dtype=np.float32)
+    m[0, :3] = side
+    m[1, :3] = up_corrected
+    m[2, :3] = -forward
+
+    t = np.eye(4, dtype=np.float32)
+    t[:3, 3] = -eye
+    return m @ t
+
+
+def perspective(fov: float, aspect: float, near: float, far: float) -> np.ndarray:
+    f = 1.0 / math.tan(math.radians(fov) / 2)
     proj = np.zeros((4, 4), dtype=np.float32)
     proj[0, 0] = f / aspect
     proj[1, 1] = f
@@ -235,531 +99,373 @@ def perspective(fov, aspect, near, far):
     proj[3, 2] = -1.0
     return proj
 
-class SoundShapeVisualizer:
-    def __init__(self, width=1024, height=768):
-        # Display settings
+
+def read_wav_file(path: Path, target_rate: int) -> Tuple[np.ndarray, int]:
+    with wave.open(str(path), "rb") as wav_file:
+        sample_rate = wav_file.getframerate()
+        n_channels = wav_file.getnchannels()
+        sample_width = wav_file.getsampwidth()
+        frames = wav_file.readframes(wav_file.getnframes())
+
+    dtype = np.int16 if sample_width == 2 else np.int8
+    data = np.frombuffer(frames, dtype=dtype).astype(np.float32)
+    if n_channels > 1:
+        data = data.reshape(-1, n_channels).mean(axis=1)
+
+    if sample_rate != target_rate:
+        ratio = target_rate / sample_rate
+        x_old = np.linspace(0, 1, data.size)
+        x_new = np.linspace(0, 1, int(data.size * ratio))
+        data = np.interp(x_new, x_old, data)
+        sample_rate = target_rate
+
+    data /= np.max(np.abs(data)) if np.max(np.abs(data)) != 0 else 1
+    return data.astype(np.float32), sample_rate
+
+
+def generate_tone(sample_rate: int, freq: float = 440.0, duration: float = 5.0) -> np.ndarray:
+    t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
+    wave_data = 0.7 * np.sin(2 * np.pi * freq * t)
+    return wave_data.astype(np.float32)
+
+
+@dataclass
+class AudioStream:
+    samples: np.ndarray
+    sample_rate: int
+    cursor: int = 0
+
+    @classmethod
+    def from_source(cls, path: Optional[str], sample_rate: int) -> "AudioStream":
+        if path is not None and Path(path).exists():
+            samples, rate = read_wav_file(Path(path), sample_rate)
+        else:
+            samples = generate_tone(sample_rate)
+            rate = sample_rate
+        return cls(samples=samples, sample_rate=rate)
+
+    def next_chunk(self, size: int) -> np.ndarray:
+        end = self.cursor + size
+        if end <= self.samples.size:
+            chunk = self.samples[self.cursor:end]
+            self.cursor = end
+        else:
+            part1 = self.samples[self.cursor:]
+            part2 = self.samples[: end - self.samples.size]
+            chunk = np.concatenate([part1, part2])
+            self.cursor = end - self.samples.size
+        return chunk
+
+
+@dataclass
+class AudioAnalyzer:
+    sample_rate: int
+    fft_size: int = 2048
+    spectrogram_history: int = 120
+    spectrum_bins: int = 128
+    spectrogram: np.ndarray = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.spectrogram = np.zeros((self.spectrogram_history, self.spectrum_bins), dtype=np.float32)
+
+    def analyze(self, samples: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        window = np.hanning(min(samples.size, self.fft_size))
+        windowed = samples[: window.size] * window
+        spectrum = np.abs(np.fft.rfft(windowed, n=self.fft_size))
+        spectrum = spectrum[: self.spectrum_bins]
+        spectrum /= np.max(spectrum) if np.max(spectrum) != 0 else 1
+
+        self.spectrogram = np.roll(self.spectrogram, -1, axis=0)
+        self.spectrogram[-1] = spectrum
+
+        waveform = samples / (np.max(np.abs(samples)) if np.max(np.abs(samples)) != 0 else 1)
+        return waveform, spectrum
+
+
+@dataclass
+class Mesh:
+    vao: int
+    vbo: int
+    ebo: Optional[int]
+    count: int
+    mode: int
+
+
+class SonicMorphVisualizer:
+    def __init__(self, width: int, height: int, audio_path: Optional[str]) -> None:
         self.width = width
         self.height = height
-        
-        # Sound parameters
         self.sample_rate = 44100
-        self.frequency = 440.0
-        self.amplitude = 0.5
-        self.energy = 0.0
-        self.morph_factor = 0.0
-        self.morph_target = 0.0
-        self.morph_smoothing = 3.0
-        self.twist = 0.0
-        self.fft_bands = np.zeros(3, dtype=np.float32)
-        self.smoothed_bands = np.zeros(3, dtype=np.float32)
-        self.current_wave = np.zeros(1, dtype=np.float32)
+        self.audio_stream = AudioStream.from_source(audio_path, self.sample_rate)
+        self.analyzer = AudioAnalyzer(sample_rate=self.sample_rate)
 
-        # Shape parameters
-        self.shape_type = 0  # 0=sphere, 1=torus, 2=flower, 3=square, 4=spiral
-        self.shape_names = ["Sphere", "Torus", "Flower", "Square", "Spiral"]
-        self.auto_morph = True
-        self.morph_speed = 0.2
-        self.auto_rotate = True
-        self.rotation_speed = 0.5
-        self.auto_orbit = True
-        
-        # Visual settings
-        self.resolution = 50  # Grid resolution
-        self.base_color = np.array([0.2, 0.7, 1.0], dtype=np.float32)
-        self.line_mode = False
-        
-        # Camera settings
-        self.camera_distance = 3.0
-        self.camera_height = 0.5
-        self.camera_angle = 0.0
-        self.update_camera_position()
-
-        # Timing
-        self.start_time = time.time()
-        self.fps = 0
-        self.frame_count = 0
-        self.fps_timer = 0.0
-        
-        # Setup audio
-        self.setup_audio()
-        
-        # Create mesh geometry
-        self.create_mesh()
-        
-        # Initialize OpenGL
-        self.setup_display()
-        self.init_opengl()
-
-        # Input handling
-        self.keys = key.KeyStateHandler()
-        self.window.push_handlers(self.keys)
-        self.window.push_handlers(self.on_key_press)
-
-        # Overlay settings
-        self.show_info = True
-
-    def setup_display(self):
-        """Set up the Pyglet display and context."""
-        config = pyglet.gl.Config(double_buffer=True, depth_size=24, major_version=3, minor_version=3)
         self.window = pyglet.window.Window(
             width=self.width,
             height=self.height,
-            caption="Sound Shape Visualizer",
-            config=config,
+            caption="SonicMorph - Real Audio Geometry",
+            config=pyglet.gl.Config(double_buffer=True, depth_size=24, major_version=3, minor_version=3),
             resizable=False,
         )
-
-    def update_camera_position(self):
-        """Update camera position based on angle and distance."""
-        self.camera_position = np.array([
-            self.camera_distance * np.sin(self.camera_angle),
-            self.camera_height,
-            self.camera_distance * np.cos(self.camera_angle)
-        ], dtype=np.float32)
-        self.camera_target = np.array([0.0, 0.0, 0.0], dtype=np.float32)
-        self.camera_up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
-    
-    def create_mesh(self):
-        """Create a parametric grid for the shapes."""
-        # Create a grid of (u,v) coordinates in [0,1] range
-        u = np.linspace(0, 1, self.resolution, dtype=np.float32)
-        v = np.linspace(0, 1, self.resolution, dtype=np.float32)
-        
-        # Create vertices (u,v)
-        vertices = []
-        for i in range(self.resolution):
-            for j in range(self.resolution):
-                vertices.append([u[j], v[i]])
-        self.vertices = np.array(vertices, dtype=np.float32)
-        
-        # Create indices for triangle strips
-        indices = []
-        for i in range(self.resolution - 1):
-            for j in range(self.resolution):
-                # Add vertices for two triangles
-                indices.append(i * self.resolution + j)
-                indices.append((i + 1) * self.resolution + j)
-            
-            # Add a degenerate triangle if not the last strip
-            if i < self.resolution - 2:
-                indices.append((i + 1) * self.resolution + (self.resolution - 1))
-                indices.append((i + 1) * self.resolution)
-        
-        self.indices = np.array(indices, dtype=np.uint32)
-    
-    def init_opengl(self):
-        """Initialize OpenGL resources."""
-        # Compile shader program
-        try:
-            vertex_shader = compileShader(VERTEX_SHADER, GL_VERTEX_SHADER)
-            fragment_shader = compileShader(FRAGMENT_SHADER, GL_FRAGMENT_SHADER)
-            self.shader = compileProgram(vertex_shader, fragment_shader)
-        except Exception as e:
-            print(f"Shader compilation error: {e}")
-            import sys  # Make sure to import sys at the top of your file
-            sys.exit(1)
-            
-        # Create VAO and VBO
-        self.vao = glGenVertexArrays(1)
-        glBindVertexArray(self.vao)
-        
-        self.vbo = glGenBuffers(1)
-        glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
-        glBufferData(GL_ARRAY_BUFFER, self.vertices.nbytes, self.vertices, GL_STATIC_DRAW)
-        
-        position_loc = glGetAttribLocation(self.shader, "position")
-        glEnableVertexAttribArray(position_loc)
-        glVertexAttribPointer(position_loc, 2, GL_FLOAT, GL_FALSE, 0, None)
-        
-        # Setup index buffer
-        self.ebo = glGenBuffers(1)
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.ebo)
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, self.indices.nbytes, self.indices, GL_STATIC_DRAW)
-        
-        glBindBuffer(GL_ARRAY_BUFFER, 0)
-        glBindVertexArray(0)
-        
-        # Enable depth testing and blending
-        glEnable(GL_DEPTH_TEST)
-        glDepthFunc(GL_LESS)
-        glEnable(GL_BLEND)
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-    
-    def setup_audio(self):
-        """Initialize audio generation."""
-        self.player = pyglet.media.Player()
-        self.player.loop = True
-        self.sound_playing = False
-        self.update_sound()
-    
-    def generate_waveform(self, freq, duration=1.0):
-        """Generate a waveform for audio playback."""
-        t = np.linspace(0, duration, int(self.sample_rate * duration), endpoint=False)
-
-        # Create a complex waveform based on the current shape
-        if self.shape_type == 0:  # Sphere - pure sine wave
-            wave = self.amplitude * np.sin(2 * np.pi * freq * t)
-        elif self.shape_type == 1:  # Torus - add harmonics
-            wave = self.amplitude * np.sin(2 * np.pi * freq * t)
-            wave += 0.5 * self.amplitude * np.sin(2 * np.pi * freq * 2 * t)
-        elif self.shape_type == 2:  # Flower - add more harmonics with phase shifts
-            wave = self.amplitude * np.sin(2 * np.pi * freq * t)
-            wave += 0.3 * self.amplitude * np.sin(2 * np.pi * freq * 3 * t + 0.5)
-        elif self.shape_type == 3:  # Square - approximate square wave
-            wave = self.amplitude * np.sign(np.sin(2 * np.pi * freq * t))
-        elif self.shape_type == 4:  # Spiral - frequency sweep
-            wave = self.amplitude * np.sin(2 * np.pi * freq * t * (1 + 0.5 * t/duration))
-        else:
-            wave = self.amplitude * np.sin(2 * np.pi * freq * t)
-        
-        # Apply envelope to avoid clicks
-        envelope = np.ones_like(t)
-        attack = int(0.01 * self.sample_rate)
-        decay = int(0.05 * self.sample_rate)
-        
-        if attack > 0:
-            envelope[:attack] = np.linspace(0, 1, attack)
-        
-        if decay > 0 and decay < len(envelope):
-            decay_start = len(envelope) - decay
-            envelope[decay_start:] = np.linspace(1, 0, decay)
-
-        wave = wave * envelope
-
-        # Calculate energy for visualization
-        self.energy = np.mean(np.abs(wave)) * 2
-        self.current_wave = wave.astype(np.float32)
-        self.update_fft_bands(self.current_wave)
-
-        return (wave * 32767).astype(np.int16)
-
-    def compute_fft_bands(self, wave):
-        """Compute smoothed low/mid/high FFT magnitudes for the given waveform."""
-        if wave.size == 0:
-            return np.zeros(3, dtype=np.float32)
-
-        spectrum = np.abs(np.fft.rfft(wave))
-        freqs = np.fft.rfftfreq(wave.size, 1 / self.sample_rate)
-
-        bands = np.zeros(3, dtype=np.float32)
-        ranges = [(0, 200), (200, 800), (800, 2000)]
-        for idx, (low, high) in enumerate(ranges):
-            mask = (freqs >= low) & (freqs < high)
-            if np.any(mask):
-                bands[idx] = float(np.sqrt(np.mean(spectrum[mask] ** 2)))
-
-        # Normalize to keep values within a pleasant range
-        max_band = np.max(bands) if np.max(bands) > 0 else 1.0
-        return (bands / max_band).astype(np.float32)
-
-    def update_fft_bands(self, wave):
-        """Update and smooth the FFT band magnitudes."""
-        raw_bands = self.compute_fft_bands(wave)
-        smoothing = 0.85
-        self.smoothed_bands = smoothing * self.smoothed_bands + (1 - smoothing) * raw_bands
-        self.fft_bands = self.smoothed_bands
-    
-    def update_sound(self):
-        """Update the currently playing sound."""
-        try:
-            if self.sound_playing:
-                self.player.pause()
-                self.player.next_source()
-
-            wave_data = self.generate_waveform(self.frequency)
-            buffer = io.BytesIO()
-            with wave.open(buffer, "wb") as wav_file:
-                wav_file.setnchannels(1)
-                wav_file.setsampwidth(2)
-                wav_file.setframerate(self.sample_rate)
-                wav_file.writeframes(wave_data.tobytes())
-
-            buffer.seek(0)
-            source = pyglet.media.load("generated.wav", file=buffer, streaming=False)
-            self.player.queue(source)
-            self.player.play()
-            self.sound_playing = True
-        except Exception as e:
-            print(f"Sound error: {e}")
-            self.sound_playing = False
-
-    @staticmethod
-    def smooth_step(current, target, delta_time, speed):
-        """Smoothly move current toward target based on elapsed time."""
-        return current + (target - current) * min(1.0, delta_time * speed)
-
-    def handle_input(self, delta_time):
-        """Process user input."""
-        # Frequency controls
-        freq_change = 0
-        if self.keys[key.UP]:
-            freq_change = 10
-        elif self.keys[key.DOWN]:
-            freq_change = -10
-
-        if freq_change != 0:
-            self.frequency = max(20, min(2000, self.frequency + freq_change))
-            self.update_sound()
-
-        # Amplitude controls
-        amp_change = 0
-        if self.keys[key.PAGEUP]:
-            amp_change = 0.05
-        elif self.keys[key.PAGEDOWN]:
-            amp_change = -0.05
-
-        if amp_change != 0:
-            self.amplitude = max(0.05, min(1.0, self.amplitude + amp_change))
-            self.update_sound()
-
-        # Morph controls
-        morph_change = 0
-        if self.keys[key.M]:
-            morph_change = 0.01
-        elif self.keys[key.N]:
-            morph_change = -0.01
-
-        if morph_change != 0:
-            self.morph_target = max(0.0, min(1.0, self.morph_target + morph_change))
-
-        # Twist controls
-        twist_change = 0
-        if self.keys[key.T]:
-            twist_change = 0.1
-        elif self.keys[key.Y]:
-            twist_change = -0.1
-
-        if twist_change != 0:
-            self.twist = max(0.0, min(5.0, self.twist + twist_change))
-
-        # Camera controls
-        if self.keys[key.LEFT]:
-            self.camera_angle += 0.05
-            self.update_camera_position()
-        elif self.keys[key.RIGHT]:
-            self.camera_angle -= 0.05
-            self.update_camera_position()
-
-        if self.keys[key.W]:
-            self.camera_height += 0.05
-            self.update_camera_position()
-        elif self.keys[key.S]:
-            self.camera_height -= 0.05
-            self.update_camera_position()
-
-        if self.keys[key.A]:
-            self.camera_distance -= 0.05
-            self.update_camera_position()
-        elif self.keys[key.D]:
-            self.camera_distance += 0.05
-            self.update_camera_position()
-    
-    def update(self, delta_time):
-        """Update the visualization state."""
-        # Auto-rotate camera if enabled
-        if self.auto_rotate:
-            band_spin = self.fft_bands[1] * 0.5
-            self.camera_angle += delta_time * (self.rotation_speed + band_spin)
-
-        if self.auto_orbit:
-            target_height = 0.3 + 0.8 * float(self.fft_bands[0])
-            target_distance = 2.8 + 0.8 * float(self.fft_bands[2])
-            self.camera_height = self.smooth_step(self.camera_height, target_height, delta_time, 2.0)
-            self.camera_distance = self.smooth_step(self.camera_distance, target_distance, delta_time, 2.0)
-
-        self.update_camera_position()
-
-        # Auto-morph between shapes if enabled
-        if self.auto_morph:
-            self.morph_target = 1.0
-        self.morph_factor = self.smooth_step(self.morph_factor, self.morph_target, delta_time, self.morph_smoothing)
-
-        if self.auto_morph and self.morph_factor >= 0.99:
-            self.morph_factor = 0.0
-            self.morph_target = 0.0
-            self.shape_type = (self.shape_type + 1) % len(self.shape_names)
-            self.update_sound()  # Update sound to match new shape
-    
-    def render(self):
-        """Render the visualization."""
-        # Clear the frame
-        glClearColor(0.05, 0.05, 0.1, 1.0)
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
-        
-        # Use shader program
-        glUseProgram(self.shader)
-
-        # Set uniforms
-        current_time = time.time() - self.start_time
-
-        time_loc = glGetUniformLocation(self.shader, "time")
-        glUniform1f(time_loc, current_time)
-        
-        freq_loc = glGetUniformLocation(self.shader, "frequency")
-        glUniform1f(freq_loc, self.frequency / 440.0)
-        
-        amp_loc = glGetUniformLocation(self.shader, "amplitude")
-        glUniform1f(amp_loc, self.amplitude)
-        
-        shape_loc = glGetUniformLocation(self.shader, "shapeType")
-        glUniform1i(shape_loc, self.shape_type)
-        
-        morph_loc = glGetUniformLocation(self.shader, "morphFactor")
-        glUniform1f(morph_loc, self.morph_factor)
-        
-        twist_loc = glGetUniformLocation(self.shader, "twist")
-        twist_value = self.twist + 1.5 * float(self.fft_bands[2])
-        glUniform1f(twist_loc, twist_value)
-
-        energy_loc = glGetUniformLocation(self.shader, "energy")
-        glUniform1f(energy_loc, self.energy)
-
-        color_loc = glGetUniformLocation(self.shader, "baseColor")
-        glUniform3fv(color_loc, 1, self.base_color)
-
-        band_loc = glGetUniformLocation(self.shader, "fftBands")
-        glUniform3fv(band_loc, 1, self.fft_bands)
-
-        light_loc = glGetUniformLocation(self.shader, "lightPos")
-        glUniform3fv(light_loc, 1, np.array([2.5, 2.5, 2.5], dtype=np.float32))
-
-        # Set view matrix
-        view = lookAt(self.camera_position, self.camera_target, self.camera_up)
-        view_loc = glGetUniformLocation(self.shader, "view")
-        glUniformMatrix4fv(view_loc, 1, GL_TRUE, view)
-
-        view_pos_loc = glGetUniformLocation(self.shader, "viewPos")
-        glUniform3fv(view_pos_loc, 1, self.camera_position)
-        
-        # Set projection matrix
-        projection = perspective(45, self.width / self.height, 0.1, 100)
-        proj_loc = glGetUniformLocation(self.shader, "projection")
-        glUniformMatrix4fv(proj_loc, 1, GL_TRUE, projection)
-        
-        # Set model matrix (identity for now)
-        model = np.eye(4, dtype=np.float32)
-        model_loc = glGetUniformLocation(self.shader, "model")
-        glUniformMatrix4fv(model_loc, 1, GL_TRUE, model)
-        
-        # Draw the shape
-        glBindVertexArray(self.vao)
-        
-        if self.line_mode:
-            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
-        else:
-            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
-        
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.ebo)
-        glDrawElements(GL_TRIANGLE_STRIP, len(self.indices), GL_UNSIGNED_INT, None)
-        glBindVertexArray(0)
-        
-        # Reset polygon mode
-        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
-        
-        # Render overlay if enabled
-        if self.show_info:
-            self.render_overlay()
-    
-    def render_overlay(self):
-        """Render text overlay with information."""
-        glUseProgram(0)
-        glDisable(GL_DEPTH_TEST)
-
-        # Draw text (origin at bottom-left, so invert y for top alignment)
-        self.draw_text(10, self.height - 20, f"FPS: {self.fps:.1f}")
-        self.draw_text(10, self.height - 40, f"Shape: {self.shape_names[self.shape_type]}")
-        self.draw_text(10, self.height - 60, f"Frequency: {self.frequency:.1f} Hz")
-        self.draw_text(10, self.height - 80, f"Amplitude: {self.amplitude:.2f}")
-        self.draw_text(10, self.height - 100, f"Morph: {self.morph_factor:.2f}")
-        self.draw_text(10, self.height - 120, f"Twist: {self.twist:.1f}")
-        self.draw_text(10, self.height - 140, "FFT Low/Mid/High: {:.2f}/{:.2f}/{:.2f}".format(*self.fft_bands))
-        self.draw_text(10, self.height - 160, f"Auto-orbit: {'On' if self.auto_orbit else 'Off'}")
-
-        # Controls help
-        y_pos = 170
-        self.draw_text(10, y_pos + 100, "Controls:")
-        self.draw_text(10, y_pos + 80, "↑/↓: Frequency, PgUp/PgDn: Amplitude")
-        self.draw_text(10, y_pos + 60, "M/N: Manual morphing, T/Y: Twist")
-        self.draw_text(10, y_pos + 40, "WASD: Camera movement, ←/→: Rotate camera")
-        self.draw_text(10, y_pos + 20, "Space: Toggle sound, L: Toggle line mode")
-        self.draw_text(10, y_pos, "A: Auto-morph, R: Auto-rotate, O: Auto-orbit")
-
-        glEnable(GL_DEPTH_TEST)
-
-    def draw_text(self, x, y, text, color=(255, 255, 255)):
-        """Draw text on the screen."""
-        try:
-            label = pyglet.text.Label(
-                text,
-                font_name="Arial",
-                font_size=12,
-                x=x,
-                y=y,
-                color=(color[0], color[1], color[2], 255),
-                anchor_x="left",
-                anchor_y="baseline",
-            )
-            label.draw()
-        except Exception as e:
-            print(f"Text rendering error: {e}")
-
-    def update_fps(self, delta_time):
-        """Calculate and update FPS."""
-        self.frame_count += 1
-        self.fps_timer += delta_time
-        if self.fps_timer >= 1.0:
-            self.fps = self.frame_count / self.fps_timer
-            self.frame_count = 0
-            self.fps_timer = 0.0
-
-        return delta_time
-
-    def run(self):
-        """Main application loop."""
-        pyglet.clock.schedule_interval(self._tick, 1 / 60.0)
         self.window.push_handlers(self)
+        self.keys = pyglet.window.key.KeyStateHandler()
+        self.window.push_handlers(self.keys)
+
+        self.shader = self._build_shader()
+        self.waveform_mesh = self._create_waveform_mesh(1024)
+        self.spectrum_mesh = self._create_spectrum_mesh(self.analyzer.spectrum_bins)
+        self.spectrogram_mesh = self._create_spectrogram_mesh(
+            self.analyzer.spectrogram_history, self.analyzer.spectrum_bins
+        )
+
+        self.camera_angle = 0.0
+        self.camera_distance = 4.0
+        self.camera_height = 1.2
+        self.auto_orbit = True
+
+        self.last_time = time.time()
+        pyglet.clock.schedule_interval(self._tick, 1 / 60.0)
+
+    def _build_shader(self) -> int:
+        return compileProgram(
+            compileShader(VERTEX_SHADER, GL_VERTEX_SHADER),
+            compileShader(FRAGMENT_SHADER, GL_FRAGMENT_SHADER),
+        )
+
+    def _create_buffered_mesh(self, vertices: np.ndarray, indices: Optional[np.ndarray], mode: int) -> Mesh:
+        vao = glGenVertexArrays(1)
+        glBindVertexArray(vao)
+
+        vbo = glGenBuffers(1)
+        glBindBuffer(GL_ARRAY_BUFFER, vbo)
+        glBufferData(GL_ARRAY_BUFFER, vertices.nbytes, vertices, GL_DYNAMIC_DRAW)
+
+        stride = vertices.strides[0]
+        glEnableVertexAttribArray(0)
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(0))
+        glEnableVertexAttribArray(1)
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(12))
+
+        ebo = None
+        count = vertices.shape[0]
+        if indices is not None:
+            ebo = glGenBuffers(1)
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo)
+            glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.nbytes, indices, GL_STATIC_DRAW)
+            count = indices.size
+
+        glBindVertexArray(0)
+        return Mesh(vao=vao, vbo=vbo, ebo=ebo, count=count, mode=mode)
+
+    def _create_waveform_mesh(self, sample_count: int) -> Mesh:
+        angles = np.linspace(0, 2 * np.pi, sample_count, endpoint=False)
+        base_radius = 1.2
+        ribbon_width = 0.04
+
+        vertices = []
+        indices = []
+        for idx, angle in enumerate(angles):
+            dir_vec = np.array([math.cos(angle), 0.0, math.sin(angle)], dtype=np.float32)
+            left = np.array([-math.sin(angle), 0.0, math.cos(angle)], dtype=np.float32)
+            center = dir_vec * base_radius
+
+            top = center + left * ribbon_width
+            bottom = center - left * ribbon_width
+            normal = dir_vec
+            vertices.append(np.concatenate([top, normal]))
+            vertices.append(np.concatenate([bottom, normal]))
+            if idx < sample_count - 1:
+                base = idx * 2
+                indices.extend([base, base + 1, base + 2, base + 3])
+
+        vertex_array = np.array(vertices, dtype=np.float32)
+        index_array = np.array(indices, dtype=np.uint32)
+        return self._create_buffered_mesh(vertex_array, index_array, GL_TRIANGLE_STRIP)
+
+    def _create_spectrum_mesh(self, bins: int) -> Mesh:
+        x_positions = np.linspace(-1.5, 1.5, bins)
+        bar_width = (x_positions[1] - x_positions[0]) * 0.6
+        vertices = []
+        indices = []
+        for i, x in enumerate(x_positions):
+            z = -1.2
+            normal = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+            base = len(vertices)
+            vertices.append(np.concatenate([[x - bar_width, 0.0, z], normal]))
+            vertices.append(np.concatenate([[x + bar_width, 0.0, z], normal]))
+            vertices.append(np.concatenate([[x + bar_width, 0.1, z], normal]))
+            vertices.append(np.concatenate([[x - bar_width, 0.1, z], normal]))
+            indices.extend([base, base + 1, base + 2, base, base + 2, base + 3])
+
+        vertex_array = np.array(vertices, dtype=np.float32)
+        index_array = np.array(indices, dtype=np.uint32)
+        return self._create_buffered_mesh(vertex_array, index_array, GL_TRIANGLES)
+
+    def _create_spectrogram_mesh(self, history: int, bins: int) -> Mesh:
+        time_axis = np.linspace(-2.5, 0.5, history)
+        freq_axis = np.linspace(-1.5, 1.5, bins)
+        vertices = []
+        indices = []
+        for t_idx, t in enumerate(time_axis):
+            for f_idx, f in enumerate(freq_axis):
+                pos = np.array([f, 0.0, t], dtype=np.float32)
+                normal = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+                vertices.append(np.concatenate([pos, normal]))
+
+        for t_idx in range(history - 1):
+            for f_idx in range(bins - 1):
+                v0 = t_idx * bins + f_idx
+                v1 = v0 + 1
+                v2 = v0 + bins
+                v3 = v2 + 1
+                indices.extend([v0, v2, v1, v1, v2, v3])
+
+        vertex_array = np.array(vertices, dtype=np.float32)
+        index_array = np.array(indices, dtype=np.uint32)
+        return self._create_buffered_mesh(vertex_array, index_array, GL_TRIANGLES)
+
+    def _update_waveform_mesh(self, waveform: np.ndarray) -> None:
+        sample_count = waveform.size
+        angle_step = 2 * np.pi / sample_count
+        mapped = np.empty((sample_count * 2, 6), dtype=np.float32)
+        base_radius = 1.2
+        ribbon_width = 0.04
+        for i in range(sample_count):
+            angle = i * angle_step
+            dir_vec = np.array([math.cos(angle), 0.0, math.sin(angle)], dtype=np.float32)
+            left = np.array([-math.sin(angle), 0.0, math.cos(angle)], dtype=np.float32)
+            center = dir_vec * (base_radius + waveform[i] * 0.4)
+            top = center + left * ribbon_width
+            bottom = center - left * ribbon_width
+            normal = dir_vec
+            mapped[2 * i, :3] = top
+            mapped[2 * i, 3:] = normal
+            mapped[2 * i + 1, :3] = bottom
+            mapped[2 * i + 1, 3:] = normal
+
+        glBindBuffer(GL_ARRAY_BUFFER, self.waveform_mesh.vbo)
+        glBufferSubData(GL_ARRAY_BUFFER, 0, mapped.nbytes, mapped)
+
+    def _update_spectrum_mesh(self, spectrum: np.ndarray) -> None:
+        vertices = []
+        x_positions = np.linspace(-1.5, 1.5, spectrum.size)
+        bar_width = (x_positions[1] - x_positions[0]) * 0.6
+        for x, value in zip(x_positions, spectrum):
+            height = 0.15 + value * 1.2
+            z = -1.2
+            normal = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+            vertices.append(np.concatenate([[x - bar_width, 0.0, z], normal]))
+            vertices.append(np.concatenate([[x + bar_width, 0.0, z], normal]))
+            vertices.append(np.concatenate([[x + bar_width, height, z], normal]))
+            vertices.append(np.concatenate([[x - bar_width, height, z], normal]))
+
+        vertex_array = np.array(vertices, dtype=np.float32)
+        glBindBuffer(GL_ARRAY_BUFFER, self.spectrum_mesh.vbo)
+        glBufferSubData(GL_ARRAY_BUFFER, 0, vertex_array.nbytes, vertex_array)
+
+    def _update_spectrogram_mesh(self) -> None:
+        history, bins = self.analyzer.spectrogram.shape
+        time_axis = np.linspace(-2.5, 0.5, history)
+        freq_axis = np.linspace(-1.5, 1.5, bins)
+        vertices = np.empty((history * bins, 6), dtype=np.float32)
+        for t_idx, t in enumerate(time_axis):
+            for f_idx, f in enumerate(freq_axis):
+                amplitude = self.analyzer.spectrogram[t_idx, f_idx]
+                height = amplitude * 1.2
+                pos = np.array([f, height, t], dtype=np.float32)
+                normal = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+                idx = t_idx * bins + f_idx
+                vertices[idx, :3] = pos
+                vertices[idx, 3:] = normal
+
+        glBindBuffer(GL_ARRAY_BUFFER, self.spectrogram_mesh.vbo)
+        glBufferSubData(GL_ARRAY_BUFFER, 0, vertices.nbytes, vertices)
+
+    def _update_camera(self, delta_time: float) -> None:
+        if self.auto_orbit:
+            self.camera_angle += delta_time * 0.4
+        if self.keys[pyglet.window.key.LEFT]:
+            self.camera_angle -= delta_time * 1.2
+        if self.keys[pyglet.window.key.RIGHT]:
+            self.camera_angle += delta_time * 1.2
+        if self.keys[pyglet.window.key.UP]:
+            self.camera_height += delta_time * 0.8
+        if self.keys[pyglet.window.key.DOWN]:
+            self.camera_height -= delta_time * 0.8
+
+    def _camera_matrices(self) -> Tuple[np.ndarray, np.ndarray]:
+        eye = np.array(
+            [
+                self.camera_distance * math.sin(self.camera_angle),
+                self.camera_height,
+                self.camera_distance * math.cos(self.camera_angle),
+            ],
+            dtype=np.float32,
+        )
+        center = np.array([0.0, 0.4, 0.0], dtype=np.float32)
+        up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        view = look_at(eye, center, up)
+        projection = perspective(50, self.width / self.height, 0.1, 100.0)
+        return view, projection
+
+    def _render_mesh(self, mesh: Mesh, color: Tuple[float, float, float], view: np.ndarray, projection: np.ndarray) -> None:
+        glUseProgram(self.shader)
+        model = np.eye(4, dtype=np.float32)
+
+        glUniformMatrix4fv(glGetUniformLocation(self.shader, "model"), 1, GL_TRUE, model)
+        glUniformMatrix4fv(glGetUniformLocation(self.shader, "view"), 1, GL_TRUE, view)
+        glUniformMatrix4fv(glGetUniformLocation(self.shader, "projection"), 1, GL_TRUE, projection)
+        glUniform3fv(glGetUniformLocation(self.shader, "baseColor"), 1, np.array(color, dtype=np.float32))
+        glUniform3fv(glGetUniformLocation(self.shader, "lightPos"), 1, np.array([2.5, 2.5, 2.5], dtype=np.float32))
+        glUniform3fv(glGetUniformLocation(self.shader, "viewPos"), 1, np.array([0.0, 0.0, 5.0], dtype=np.float32))
+
+        glBindVertexArray(mesh.vao)
+        if mesh.ebo is not None:
+            glDrawElements(mesh.mode, mesh.count, GL_UNSIGNED_INT, None)
+        else:
+            glDrawArrays(mesh.mode, 0, mesh.count)
+        glBindVertexArray(0)
+
+    def _tick(self, dt: float) -> None:
+        now = time.time()
+        delta_time = now - self.last_time
+        self.last_time = now
+
+        self._update_camera(delta_time)
+        chunk = self.audio_stream.next_chunk(2048)
+        waveform, spectrum = self.analyzer.analyze(chunk)
+        self._update_waveform_mesh(waveform)
+        self._update_spectrum_mesh(spectrum)
+        self._update_spectrogram_mesh()
+        self.window.invalidate()
+
+    def on_draw(self) -> None:
+        glEnable(GL_DEPTH_TEST)
+        glClearColor(0.02, 0.02, 0.05, 1.0)
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+
+        view, projection = self._camera_matrices()
+        self._render_mesh(self.spectrogram_mesh, (0.15, 0.45, 0.85), view, projection)
+        self._render_mesh(self.spectrum_mesh, (0.9, 0.35, 0.15), view, projection)
+        self._render_mesh(self.waveform_mesh, (0.2, 0.9, 0.6), view, projection)
+
+    def on_key_press(self, symbol: int, modifiers: int) -> None:
+        if symbol == pyglet.window.key.ESCAPE:
+            pyglet.app.exit()
+        elif symbol == pyglet.window.key.O:
+            self.auto_orbit = not self.auto_orbit
+
+    def run(self) -> None:
         pyglet.app.run()
 
-    def _tick(self, delta_time):
-        self.update_fps(delta_time)
-        self.handle_input(delta_time)
-        self.update(delta_time)
 
-    def on_draw(self):
-        self.render()
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Visualize real audio as 3D geometry.")
+    parser.add_argument("--audio", type=str, default=None, help="Path to a WAV file to visualize")
+    args = parser.parse_args()
 
-    def on_close(self):
-        if self.sound_playing:
-            self.player.pause()
-        self.player.delete()
-        self.window.close()
-        pyglet.app.exit()
-
-    def on_key_press(self, symbol, modifiers):
-        if symbol == key.ESCAPE:
-            self.on_close()
-        elif symbol == key.SPACE:
-            if self.sound_playing:
-                self.player.pause()
-                self.sound_playing = False
-            else:
-                self.update_sound()
-        elif symbol == key.H:
-            self.show_info = not self.show_info
-        elif symbol == key.L:
-            self.line_mode = not self.line_mode
-        elif symbol == key.A:
-            self.auto_morph = not self.auto_morph
-        elif symbol == key.R:
-            self.auto_rotate = not self.auto_rotate
-        elif symbol == key.O:
-            self.auto_orbit = not self.auto_orbit
-        elif symbol == key.TAB:
-            self.shape_type = (self.shape_type + 1) % len(self.shape_names)
-            self.morph_factor = 0.0
-            self.update_sound()
+    visualizer = SonicMorphVisualizer(width=1280, height=800, audio_path=args.audio)
+    visualizer.run()
 
 
 if __name__ == "__main__":
-    visualizer = SoundShapeVisualizer(width=1024, height=768)
-    visualizer.run()
+    main()
