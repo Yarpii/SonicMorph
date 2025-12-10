@@ -1,10 +1,12 @@
-import pygame
-from pygame.locals import *
+import io
+import time
+import wave
+
+import pyglet
+from pyglet.window import key
 from OpenGL.GL import *
 from OpenGL.GL.shaders import compileProgram, compileShader
 import numpy as np
-import time
-import math
 
 # Vertex shader with parametric morphing capabilities
 VERTEX_SHADER = """
@@ -245,12 +247,12 @@ class SoundShapeVisualizer:
         self.camera_height = 0.5
         self.camera_angle = 0.0
         self.update_camera_position()
-        
+
         # Timing
         self.start_time = time.time()
-        self.last_frame_time = self.start_time
         self.fps = 0
         self.frame_count = 0
+        self.fps_timer = 0.0
         
         # Setup audio
         self.setup_audio()
@@ -261,18 +263,26 @@ class SoundShapeVisualizer:
         # Initialize OpenGL
         self.setup_display()
         self.init_opengl()
-        
-        # Font for overlay
-        pygame.font.init()
-        self.font = pygame.font.SysFont('Arial', 18)
+
+        # Input handling
+        self.keys = key.KeyStateHandler()
+        self.window.push_handlers(self.keys)
+        self.window.push_handlers(self.on_key_press)
+
+        # Overlay settings
         self.show_info = True
-    
+
     def setup_display(self):
-        """Set up the Pygame display."""
-        self.display = (self.width, self.height)
-        self.screen = pygame.display.set_mode(self.display, DOUBLEBUF | OPENGL)
-        pygame.display.set_caption("Sound Shape Visualizer")
-    
+        """Set up the Pyglet display and context."""
+        config = pyglet.gl.Config(double_buffer=True, depth_size=24, major_version=3, minor_version=3)
+        self.window = pyglet.window.Window(
+            width=self.width,
+            height=self.height,
+            caption="Sound Shape Visualizer",
+            config=config,
+            resizable=False,
+        )
+
     def update_camera_position(self):
         """Update camera position based on angle and distance."""
         self.camera_position = np.array([
@@ -351,7 +361,8 @@ class SoundShapeVisualizer:
     
     def setup_audio(self):
         """Initialize audio generation."""
-        pygame.mixer.init(frequency=self.sample_rate, size=-16, channels=1)
+        self.player = pyglet.media.Player()
+        self.player.loop = True
         self.sound_playing = False
         self.update_sound()
     
@@ -398,11 +409,21 @@ class SoundShapeVisualizer:
         """Update the currently playing sound."""
         try:
             if self.sound_playing:
-                pygame.mixer.stop()
-            
+                self.player.pause()
+                self.player.next_source()
+
             wave_data = self.generate_waveform(self.frequency)
-            sound = pygame.mixer.Sound(buffer=wave_data)
-            sound.play(-1)  # Loop indefinitely
+            buffer = io.BytesIO()
+            with wave.open(buffer, "wb") as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(self.sample_rate)
+                wav_file.writeframes(wave_data.tobytes())
+
+            buffer.seek(0)
+            source = pyglet.media.load("generated.wav", file=buffer, streaming=False)
+            self.player.queue(source)
+            self.player.play()
             self.sound_playing = True
         except Exception as e:
             print(f"Sound error: {e}")
@@ -410,69 +431,67 @@ class SoundShapeVisualizer:
     
     def handle_input(self, delta_time):
         """Process user input."""
-        keys = pygame.key.get_pressed()
-        
         # Frequency controls
         freq_change = 0
-        if keys[K_UP]:
+        if self.keys[key.UP]:
             freq_change = 10
-        elif keys[K_DOWN]:
+        elif self.keys[key.DOWN]:
             freq_change = -10
-        
+
         if freq_change != 0:
             self.frequency = max(20, min(2000, self.frequency + freq_change))
             self.update_sound()
-        
+
         # Amplitude controls
         amp_change = 0
-        if keys[K_PAGEUP]:
+        if self.keys[key.PAGEUP]:
             amp_change = 0.05
-        elif keys[K_PAGEDOWN]:
+        elif self.keys[key.PAGEDOWN]:
             amp_change = -0.05
-        
+
         if amp_change != 0:
             self.amplitude = max(0.05, min(1.0, self.amplitude + amp_change))
             self.update_sound()
-        
+
         # Morph controls
         morph_change = 0
-        if keys[K_m]:
+        if self.keys[key.M]:
             morph_change = 0.01
-        elif keys[K_n]:
+        elif self.keys[key.N]:
             morph_change = -0.01
-        
+
         if morph_change != 0:
             self.morph_factor = max(0.0, min(1.0, self.morph_factor + morph_change))
-        
+
         # Twist controls
         twist_change = 0
-        if keys[K_t]:
+        if self.keys[key.T]:
             twist_change = 0.1
-        elif keys[K_y]:
+        elif self.keys[key.Y]:
             twist_change = -0.1
-        
+
         if twist_change != 0:
             self.twist = max(0.0, min(5.0, self.twist + twist_change))
-        
+
         # Camera controls
-        if keys[K_LEFT]:
+        if self.keys[key.LEFT]:
             self.camera_angle += 0.05
             self.update_camera_position()
-        elif keys[K_RIGHT]:
+        elif self.keys[key.RIGHT]:
             self.camera_angle -= 0.05
             self.update_camera_position()
-        
-        if keys[K_w]:
+
+        if self.keys[key.W]:
             self.camera_height += 0.05
             self.update_camera_position()
-        elif keys[K_s]:
+        elif self.keys[key.S]:
             self.camera_height -= 0.05
             self.update_camera_position()
-        
-        if keys[K_a]:
+
+        if self.keys[key.A]:
             self.camera_distance -= 0.05
             self.update_camera_position()
-        elif keys[K_d]:
+        elif self.keys[key.D]:
             self.camera_distance += 0.05
             self.update_camera_position()
     
@@ -563,126 +582,100 @@ class SoundShapeVisualizer:
     
     def render_overlay(self):
         """Render text overlay with information."""
-        # Switch to 2D rendering
         glUseProgram(0)
-        glMatrixMode(GL_PROJECTION)
-        glPushMatrix()
-        glLoadIdentity()
-        glOrtho(0, self.width, self.height, 0, -1, 1)
-        glMatrixMode(GL_MODELVIEW)
-        glPushMatrix()
-        glLoadIdentity()
         glDisable(GL_DEPTH_TEST)
-        
-        # Draw text
-        self.draw_text(10, 10, f"FPS: {self.fps:.1f}")
-        self.draw_text(10, 30, f"Shape: {self.shape_names[self.shape_type]}")
-        self.draw_text(10, 50, f"Frequency: {self.frequency:.1f} Hz")
-        self.draw_text(10, 70, f"Amplitude: {self.amplitude:.2f}")
-        self.draw_text(10, 90, f"Morph: {self.morph_factor:.2f}")
-        self.draw_text(10, 110, f"Twist: {self.twist:.1f}")
-        
+
+        # Draw text (origin at bottom-left, so invert y for top alignment)
+        self.draw_text(10, self.height - 20, f"FPS: {self.fps:.1f}")
+        self.draw_text(10, self.height - 40, f"Shape: {self.shape_names[self.shape_type]}")
+        self.draw_text(10, self.height - 60, f"Frequency: {self.frequency:.1f} Hz")
+        self.draw_text(10, self.height - 80, f"Amplitude: {self.amplitude:.2f}")
+        self.draw_text(10, self.height - 100, f"Morph: {self.morph_factor:.2f}")
+        self.draw_text(10, self.height - 120, f"Twist: {self.twist:.1f}")
+
         # Controls help
-        y_pos = self.height - 140
-        self.draw_text(10, y_pos, "Controls:")
-        self.draw_text(10, y_pos + 20, "↑/↓: Frequency, PgUp/PgDn: Amplitude")
-        self.draw_text(10, y_pos + 40, "M/N: Manual morphing, T/Y: Twist")
-        self.draw_text(10, y_pos + 60, "WASD: Camera movement, ←/→: Rotate camera")
-        self.draw_text(10, y_pos + 80, "Space: Toggle sound, L: Toggle line mode")
-        self.draw_text(10, y_pos + 100, "A: Toggle auto-morph, R: Toggle auto-rotate")
-        
-        # Restore 3D rendering
+        y_pos = 140
+        self.draw_text(10, y_pos + 100, "Controls:")
+        self.draw_text(10, y_pos + 80, "↑/↓: Frequency, PgUp/PgDn: Amplitude")
+        self.draw_text(10, y_pos + 60, "M/N: Manual morphing, T/Y: Twist")
+        self.draw_text(10, y_pos + 40, "WASD: Camera movement, ←/→: Rotate camera")
+        self.draw_text(10, y_pos + 20, "Space: Toggle sound, L: Toggle line mode")
+        self.draw_text(10, y_pos, "A: Toggle auto-morph, R: Toggle auto-rotate")
+
         glEnable(GL_DEPTH_TEST)
-        glMatrixMode(GL_PROJECTION)
-        glPopMatrix()
-        glMatrixMode(GL_MODELVIEW)
-        glPopMatrix()
-    
+
     def draw_text(self, x, y, text, color=(255, 255, 255)):
         """Draw text on the screen."""
         try:
-            text_surface = self.font.render(text, True, color)
-            text_data = pygame.image.tostring(text_surface, "RGBA", True)
-            width, height = text_surface.get_size()
-            
-            glEnable(GL_BLEND)
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-            glRasterPos2d(x, y)
-            glDrawPixels(width, height, GL_RGBA, GL_UNSIGNED_BYTE, text_data)
-            glDisable(GL_BLEND)
+            label = pyglet.text.Label(
+                text,
+                font_name="Arial",
+                font_size=12,
+                x=x,
+                y=y,
+                color=(color[0], color[1], color[2], 255),
+                anchor_x="left",
+                anchor_y="baseline",
+            )
+            label.draw()
         except Exception as e:
             print(f"Text rendering error: {e}")
-    
-    def update_fps(self):
+
+    def update_fps(self, delta_time):
         """Calculate and update FPS."""
-        current_time = time.time()
-        delta_time = current_time - self.last_frame_time
-        self.last_frame_time = current_time
-        
         self.frame_count += 1
-        if current_time - self.start_time >= 1.0:
-            self.fps = self.frame_count / (current_time - self.start_time)
+        self.fps_timer += delta_time
+        if self.fps_timer >= 1.0:
+            self.fps = self.frame_count / self.fps_timer
             self.frame_count = 0
-            self.start_time = current_time
-        
+            self.fps_timer = 0.0
+
         return delta_time
-    
+
     def run(self):
         """Main application loop."""
-        clock = pygame.time.Clock()
-        running = True
-        
-        while running:
-            delta_time = self.update_fps()
-            
-            # Handle events
-            for event in pygame.event.get():
-                if event.type == QUIT:
-                    running = False
-                elif event.type == KEYDOWN:
-                    if event.key == K_ESCAPE:
-                        running = False
-                    elif event.key == K_SPACE:
-                        if self.sound_playing:
-                            pygame.mixer.stop()
-                            self.sound_playing = False
-                        else:
-                            self.update_sound()
-                    elif event.key == K_h:
-                        self.show_info = not self.show_info
-                    elif event.key == K_l:
-                        self.line_mode = not self.line_mode
-                    elif event.key == K_a:
-                        self.auto_morph = not self.auto_morph
-                    elif event.key == K_r:
-                        self.auto_rotate = not self.auto_rotate
-                    elif event.key == K_TAB:
-                        # Manually change shape
-                        self.shape_type = (self.shape_type + 1) % len(self.shape_names)
-                        self.morph_factor = 0.0
-                        self.update_sound()
-            
-            # Process continuous input
-            self.handle_input(delta_time)
-            
-            # Update state
-            self.update(delta_time)
-            
-            # Render the scene
-            self.render()
-            
-            # Swap buffers
-            pygame.display.flip()
-            
-            # Control frame rate
-            clock.tick(60)
-        
-        # Clean up
+        pyglet.clock.schedule_interval(self._tick, 1 / 60.0)
+        self.window.push_handlers(self)
+        pyglet.app.run()
+
+    def _tick(self, delta_time):
+        self.update_fps(delta_time)
+        self.handle_input(delta_time)
+        self.update(delta_time)
+
+    def on_draw(self):
+        self.render()
+
+    def on_close(self):
         if self.sound_playing:
-            pygame.mixer.stop()
-        pygame.quit()
+            self.player.pause()
+        self.player.delete()
+        self.window.close()
+        pyglet.app.exit()
+
+    def on_key_press(self, symbol, modifiers):
+        if symbol == key.ESCAPE:
+            self.on_close()
+        elif symbol == key.SPACE:
+            if self.sound_playing:
+                self.player.pause()
+                self.sound_playing = False
+            else:
+                self.update_sound()
+        elif symbol == key.H:
+            self.show_info = not self.show_info
+        elif symbol == key.L:
+            self.line_mode = not self.line_mode
+        elif symbol == key.A:
+            self.auto_morph = not self.auto_morph
+        elif symbol == key.R:
+            self.auto_rotate = not self.auto_rotate
+        elif symbol == key.TAB:
+            self.shape_type = (self.shape_type + 1) % len(self.shape_names)
+            self.morph_factor = 0.0
+            self.update_sound()
+
 
 if __name__ == "__main__":
-    pygame.init()
     visualizer = SoundShapeVisualizer(width=1024, height=768)
     visualizer.run()
