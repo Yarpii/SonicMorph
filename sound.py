@@ -233,6 +233,7 @@ class Mesh:
     ebo: Optional[int]
     mode: int
     count: int
+    buffer_bytes: int
 
 
 def create_mesh(vertices: np.ndarray, indices: Optional[np.ndarray], mode: int) -> Mesh:
@@ -251,6 +252,7 @@ def create_mesh(vertices: np.ndarray, indices: Optional[np.ndarray], mode: int) 
 
     ebo = None
     count = vertices.shape[0]
+    buffer_bytes = vertices.nbytes
     if indices is not None:
         ebo = glGenBuffers(1)
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo)
@@ -258,7 +260,16 @@ def create_mesh(vertices: np.ndarray, indices: Optional[np.ndarray], mode: int) 
         count = indices.size
 
     glBindVertexArray(0)
-    return Mesh(vao=vao, vbo=vbo, ebo=ebo, mode=mode, count=count)
+    return Mesh(vao=vao, vbo=vbo, ebo=ebo, mode=mode, count=count, buffer_bytes=buffer_bytes)
+
+
+def ensure_vbo_capacity(mesh: Mesh, data: np.ndarray) -> None:
+    glBindBuffer(GL_ARRAY_BUFFER, mesh.vbo)
+    if data.nbytes != mesh.buffer_bytes:
+        glBufferData(GL_ARRAY_BUFFER, data.nbytes, None, GL_DYNAMIC_DRAW)
+        mesh.buffer_bytes = data.nbytes
+    if mesh.ebo is None:
+        mesh.count = data.shape[0]
 
 
 # --- Geometry Builders -----------------------------------------------------
@@ -409,6 +420,7 @@ class WaveRibbon(VisualElement):
             mapped[2 * i + 1, :3] = bottom
             mapped[2 * i + 1, 3:] = normal
 
+        ensure_vbo_capacity(self.mesh, mapped)
         glBindBuffer(GL_ARRAY_BUFFER, self.mesh.vbo)
         glBufferSubData(GL_ARRAY_BUFFER, 0, mapped.nbytes, mapped)
         return float(np.max(np.abs(waveform)))
@@ -433,6 +445,7 @@ class SpectrumBars(VisualElement):
             vertices.append(np.concatenate([[x - bar_width, height, z], normal]))
 
         data = np.array(vertices, dtype=np.float32)
+        ensure_vbo_capacity(self.mesh, data)
         glBindBuffer(GL_ARRAY_BUFFER, self.mesh.vbo)
         glBufferSubData(GL_ARRAY_BUFFER, 0, data.nbytes, data)
         return float(np.mean(spectrum))
@@ -459,6 +472,7 @@ class SpectrogramSurface(VisualElement):
                 vertices[idx, :3] = pos
                 vertices[idx, 3:] = normal
 
+        ensure_vbo_capacity(self.mesh, vertices)
         glBindBuffer(GL_ARRAY_BUFFER, self.mesh.vbo)
         glBufferSubData(GL_ARRAY_BUFFER, 0, vertices.nbytes, vertices)
         return float(np.max(self.analyzer.spectrogram))
