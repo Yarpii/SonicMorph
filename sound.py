@@ -1,210 +1,100 @@
-import pygame
-from pygame.locals import *
+import argparse
+import math
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Iterable, Optional, Tuple
+
+import numpy as np
+import pyglet
 from OpenGL.GL import *
 from OpenGL.GL.shaders import compileProgram, compileShader
-import numpy as np
-import time
-import math
 
-# Vertex shader with parametric morphing capabilities
+
+# --- GLSL Shaders -----------------------------------------------------------
 VERTEX_SHADER = """
-#version 330
-in vec2 position;  // Parametric coordinates (u,v)
-uniform float time;
-uniform float frequency;
-uniform float amplitude;
-uniform int shapeType;  // 0=sphere, 1=torus, 2=flower, 3=square, etc.
-uniform float morphFactor;  // For smooth transitions between shapes
-uniform float twist;  // For adding twists to the shape
+#version 330 core
+in vec3 position;
+in vec3 normal;
+
 uniform mat4 model;
 uniform mat4 view;
 uniform mat4 projection;
+uniform float timeSec;
+uniform float accent;
+uniform vec3 color;
 
-// Base parametric equations
-vec3 createSphere(vec2 p) {
-    float u = p.x * 2.0 * 3.14159;
-    float v = p.y * 3.14159;
-    return vec3(
-        cos(u) * sin(v),
-        cos(v),
-        sin(u) * sin(v)
-    );
-}
-
-vec3 createTorus(vec2 p) {
-    float u = p.x * 2.0 * 3.14159;
-    float v = p.y * 2.0 * 3.14159;
-    float R = 0.7;  // Major radius
-    float r = 0.3;  // Minor radius
-    return vec3(
-        (R + r * cos(v)) * cos(u),
-        r * sin(v),
-        (R + r * cos(v)) * sin(u)
-    );
-}
-
-vec3 createFlower(vec2 p) {
-    float u = p.x * 2.0 * 3.14159;
-    float v = p.y * 3.14159;
-    float petals = 5.0 + amplitude * 10.0;  // Number of petals varies with amplitude
-    float r = 0.5 + 0.3 * cos(petals * u);  // Flower shape
-    return vec3(
-        r * cos(u) * sin(v),
-        cos(v),
-        r * sin(u) * sin(v)
-    );
-}
-
-vec3 createSquare(vec2 p) {
-    float u = p.x * 2.0 - 1.0;  // Map to [-1,1]
-    float v = p.y * 2.0 - 1.0;  // Map to [-1,1]
-    
-    // Create a rounded square using smoothing
-    float r = 0.9;  // Size of square
-    float smoothFactor = 0.1;  // Smoothing factor
-    
-    // Smooth max function for corners
-    float x = u < 0.0 ? -max(abs(u), smoothFactor) : max(abs(u), smoothFactor);
-    float z = v < 0.0 ? -max(abs(v), smoothFactor) : max(abs(v), smoothFactor);
-    float y = 0.0;  // Flat square initially
-    
-    // Add wave deformation to the square
-    y = amplitude * sin(frequency * 10.0 * (u*u + v*v) - time);
-    
-    return vec3(x, y, z);
-}
-
-vec3 createSpiral(vec2 p) {
-    float u = p.x * 10.0 * 3.14159;  // More loops
-    float v = p.y;
-    
-    float r = 0.1 + v * 0.9;  // Radius increases from center to edge
-    float height = (v - 0.5) * 2.0;  // Height from -1 to 1
-    
-    return vec3(
-        r * cos(u + twist * height * 5.0),
-        height,
-        r * sin(u + twist * height * 5.0)
-    );
-}
+out vec3 vNormal;
+out vec3 vPosition;
+out vec3 vColor;
 
 void main() {
-    // Get base shape based on selected type
-    vec3 basePos;
-    vec3 morphPos;
-    
-    // First shape (based on shapeType)
-    if (shapeType == 0) {
-        basePos = createSphere(position);
-    } else if (shapeType == 1) {
-        basePos = createTorus(position);
-    } else if (shapeType == 2) {
-        basePos = createFlower(position);
-    } else if (shapeType == 3) {
-        basePos = createSquare(position);
-    } else if (shapeType == 4) {
-        basePos = createSpiral(position);
-    } else {
-        basePos = createSphere(position);  // Default
-    }
-    
-    // Calculate the next shape for morphing
-    int nextShape = (shapeType + 1) % 5;
-    if (nextShape == 0) {
-        morphPos = createSphere(position);
-    } else if (nextShape == 1) {
-        morphPos = createTorus(position);
-    } else if (nextShape == 2) {
-        morphPos = createFlower(position);
-    } else if (nextShape == 3) {
-        morphPos = createSquare(position);
-    } else if (nextShape == 4) {
-        morphPos = createSpiral(position);
-    } else {
-        morphPos = createSphere(position);
-    }
-    
-    // Blend between shapes using the morph factor
-    vec3 finalPos = mix(basePos, morphPos, morphFactor);
-    
-    // Apply frequency-based deformation
-    finalPos += amplitude * 0.3 * sin(frequency * 2.0 * finalPos.x + time) * vec3(0.0, 1.0, 0.0);
-    
-    // Apply a twist based on height and time
-    float twistAmount = twist * sin(time * 0.5);
-    float cosT = cos(twistAmount * finalPos.y);
-    float sinT = sin(twistAmount * finalPos.y);
-    finalPos.xz = vec2(
-        finalPos.x * cosT - finalPos.z * sinT,
-        finalPos.x * sinT + finalPos.z * cosT
-    );
-    
-    // Position in 3D space with animation
-    gl_Position = projection * view * model * vec4(finalPos, 1.0);
+    vec4 worldPos = model * vec4(position, 1.0);
+    // tiny vertex shimmer based on audio accent to keep motion silky
+    worldPos.xyz += normal * accent * 0.02 * sin(timeSec + position.x * 4.0 + position.z * 2.0);
+    vPosition = (view * worldPos).xyz;
+    vNormal = mat3(view * model) * normal;
+    vColor = color;
+    gl_Position = projection * vec4(vPosition, 1.0);
 }
 """
 
-# Fragment shader with dynamic lighting
 FRAGMENT_SHADER = """
-#version 330
-in vec3 fragNormal;
-in vec3 fragPosition;
+#version 330 core
+in vec3 vNormal;
+in vec3 vPosition;
+in vec3 vColor;
+
 out vec4 fragColor;
 
 uniform vec3 lightPos;
 uniform vec3 viewPos;
-uniform vec3 baseColor;
-uniform float time;
-uniform float frequency;
-uniform float energy;
+uniform float accent;
 
 void main() {
-    // Color based on position for more interesting visuals
-    vec3 color = baseColor;
-    color = color * (0.7 + 0.3 * sin(fragPosition.y * 3.0 + time));
-    
-    // Add frequency-dependent color modulation
-    color.r += 0.2 * sin(time * 0.3 + frequency * 0.01);
-    color.g += 0.2 * sin(time * 0.5 + frequency * 0.02);
-    color.b += 0.2 * sin(time * 0.7 + frequency * 0.03);
-    
-    // Energy pulsation effect
-    float pulse = 0.8 + 0.2 * sin(time * 5.0) + energy * 0.3;
-    color *= pulse;
-    
-    fragColor = vec4(color, 1.0);
+    vec3 N = normalize(vNormal);
+    vec3 L = normalize(lightPos - vPosition);
+    vec3 V = normalize(viewPos - vPosition);
+    vec3 R = reflect(-L, N);
+
+    float diff = max(dot(N, L), 0.0);
+    float spec = pow(max(dot(R, V), 0.0), 48.0);
+
+    vec3 base = vColor;
+    // Rim glow
+    float rim = pow(1.0 - max(dot(N, V), 0.0), 2.5);
+    vec3 rimColor = mix(base, vec3(1.0), rim * 0.4 * accent);
+
+    vec3 ambient = 0.18 * base;
+    vec3 diffuse = 0.72 * diff * rimColor;
+    vec3 specular = 0.35 * spec * vec3(1.0);
+
+    fragColor = vec4(ambient + diffuse + specular, 1.0);
 }
 """
 
-def lookAt(eye, center, up):
-    """Creates a view matrix using the lookAt convention."""
-    f = center - eye
-    f_norm = np.linalg.norm(f)
-    if f_norm > 0:
-        f = f / f_norm
-    
-    s = np.cross(f, up)
-    s_norm = np.linalg.norm(s)
-    if s_norm > 0:
-        s = s / s_norm
-    
-    u = np.cross(s, f)
-    
-    M = np.eye(4, dtype=np.float32)
-    M[0, :3] = s
-    M[1, :3] = u
-    M[2, :3] = -f
-    
-    T = np.eye(4, dtype=np.float32)
-    T[0, 3] = -eye[0]
-    T[1, 3] = -eye[1]
-    T[2, 3] = -eye[2]
-    
-    return M @ T
 
-def perspective(fov, aspect, near, far):
-    """Creates a perspective projection matrix."""
-    f = 1.0 / np.tan(np.radians(fov) / 2)
+# --- Math helpers ----------------------------------------------------------
+def look_at(eye: np.ndarray, center: np.ndarray, up: np.ndarray) -> np.ndarray:
+    forward = center - eye
+    forward /= np.linalg.norm(forward) if np.linalg.norm(forward) != 0 else 1
+
+    side = np.cross(forward, up)
+    side /= np.linalg.norm(side) if np.linalg.norm(side) != 0 else 1
+    up_corrected = np.cross(side, forward)
+
+    m = np.eye(4, dtype=np.float32)
+    m[0, :3] = side
+    m[1, :3] = up_corrected
+    m[2, :3] = -forward
+
+    t = np.eye(4, dtype=np.float32)
+    t[:3, 3] = -eye
+    return m @ t
+
+
+def perspective(fov: float, aspect: float, near: float, far: float) -> np.ndarray:
+    f = 1.0 / math.tan(math.radians(fov) / 2)
     proj = np.zeros((4, 4), dtype=np.float32)
     proj[0, 0] = f / aspect
     proj[1, 1] = f
@@ -213,476 +103,519 @@ def perspective(fov, aspect, near, far):
     proj[3, 2] = -1.0
     return proj
 
-class SoundShapeVisualizer:
-    def __init__(self, width=1024, height=768):
-        # Display settings
+
+# --- Audio Layer -----------------------------------------------------------
+def read_wav(path: Path, target_rate: int) -> Tuple[np.ndarray, int]:
+    import wave
+
+    with wave.open(str(path), "rb") as wav_file:
+        sample_rate = wav_file.getframerate()
+        channels = wav_file.getnchannels()
+        width = wav_file.getsampwidth()
+        frames = wav_file.readframes(wav_file.getnframes())
+
+    dtype = np.int16 if width == 2 else np.int8
+    samples = np.frombuffer(frames, dtype=dtype).astype(np.float32)
+    if channels > 1:
+        samples = samples.reshape(-1, channels).mean(axis=1)
+
+    if sample_rate != target_rate:
+        ratio = target_rate / sample_rate
+        x_old = np.linspace(0, 1, samples.size)
+        x_new = np.linspace(0, 1, int(samples.size * ratio))
+        samples = np.interp(x_new, x_old, samples)
+        sample_rate = target_rate
+
+    max_val = np.max(np.abs(samples)) or 1.0
+    samples /= max_val
+    return samples.astype(np.float32), sample_rate
+
+
+@dataclass
+class ProceduralTone:
+    sample_rate: int
+    frequency: float = 220.0
+    phase: float = 0.0
+
+    def next_chunk(self, size: int) -> np.ndarray:
+        t = np.arange(size, dtype=np.float32) / self.sample_rate
+        wave = 0.65 * np.sin(2 * np.pi * self.frequency * t + self.phase)
+        self.phase = (self.phase + 2 * np.pi * self.frequency * size / self.sample_rate) % (2 * np.pi)
+        return wave
+
+
+@dataclass
+class AudioStream:
+    sample_rate: int
+    source_path: Optional[str] = None
+    tone: ProceduralTone = field(init=False)
+    samples: Optional[np.ndarray] = field(init=False, default=None)
+    cursor: int = 0
+
+    def __post_init__(self) -> None:
+        self.tone = ProceduralTone(sample_rate=self.sample_rate)
+        if self.source_path and Path(self.source_path).exists():
+            self.samples, _ = read_wav(Path(self.source_path), self.sample_rate)
+
+    def adjust_frequency(self, delta: float) -> None:
+        # Manual-only: no automatic frequency changes anywhere else
+        self.tone.frequency = max(20.0, min(20000.0, self.tone.frequency + delta))
+
+    def next_chunk(self, size: int) -> np.ndarray:
+        if self.samples is None:
+            return self.tone.next_chunk(size)
+
+        end = self.cursor + size
+        if end <= self.samples.size:
+            chunk = self.samples[self.cursor:end]
+            self.cursor = end
+        else:
+            part1 = self.samples[self.cursor:]
+            part2 = self.samples[: end - self.samples.size]
+            chunk = np.concatenate([part1, part2])
+            self.cursor = end - self.samples.size
+        return chunk
+
+
+@dataclass
+class AudioAnalyzer:
+    sample_rate: int
+    fft_size: int = 2048
+    spectrum_bins: int = 256
+    history: int = 180
+    spectrogram: np.ndarray = field(init=False)
+    last_rms: float = 0.0
+
+    def __post_init__(self) -> None:
+        self.spectrogram = np.zeros((self.history, self.spectrum_bins), dtype=np.float32)
+
+    def analyze(self, samples: np.ndarray) -> Tuple[np.ndarray, np.ndarray, float]:
+        window = np.hanning(min(self.fft_size, samples.size))
+        windowed = samples[: window.size] * window
+        fft = np.abs(np.fft.rfft(windowed, n=self.fft_size))
+        spectrum = fft[: self.spectrum_bins]
+        spectrum /= np.max(spectrum) if np.max(spectrum) != 0 else 1
+
+        self.spectrogram = np.roll(self.spectrogram, -1, axis=0)
+        self.spectrogram[-1] = spectrum
+
+        waveform = samples / (np.max(np.abs(samples)) if np.max(np.abs(samples)) != 0 else 1)
+        rms = float(np.sqrt(np.mean(samples**2))) if samples.size else 0.0
+        self.last_rms = 0.9 * self.last_rms + 0.1 * rms
+        return waveform, spectrum, self.last_rms
+
+
+# --- GL Utilities ----------------------------------------------------------
+class Shader:
+    def __init__(self) -> None:
+        self.program = compileProgram(
+            compileShader(VERTEX_SHADER, GL_VERTEX_SHADER),
+            compileShader(FRAGMENT_SHADER, GL_FRAGMENT_SHADER),
+        )
+
+    def use(self) -> None:
+        glUseProgram(self.program)
+
+    def uniform_matrix(self, name: str, value: np.ndarray) -> None:
+        glUniformMatrix4fv(glGetUniformLocation(self.program, name), 1, GL_TRUE, value)
+
+    def uniform_vec3(self, name: str, value: Iterable[float]) -> None:
+        glUniform3fv(glGetUniformLocation(self.program, name), 1, np.array(list(value), dtype=np.float32))
+
+    def uniform_float(self, name: str, value: float) -> None:
+        glUniform1f(glGetUniformLocation(self.program, name), value)
+
+
+@dataclass
+class Mesh:
+    vao: int
+    vbo: int
+    ebo: Optional[int]
+    mode: int
+    count: int
+    buffer_bytes: int
+
+
+def create_mesh(vertices: np.ndarray, indices: Optional[np.ndarray], mode: int) -> Mesh:
+    vao = glGenVertexArrays(1)
+    glBindVertexArray(vao)
+
+    vbo = glGenBuffers(1)
+    glBindBuffer(GL_ARRAY_BUFFER, vbo)
+    glBufferData(GL_ARRAY_BUFFER, vertices.nbytes, vertices, GL_DYNAMIC_DRAW)
+
+    stride = vertices.strides[0]
+    glEnableVertexAttribArray(0)
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(0))
+    glEnableVertexAttribArray(1)
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(12))
+
+    ebo = None
+    count = vertices.shape[0]
+    buffer_bytes = vertices.nbytes
+    if indices is not None:
+        ebo = glGenBuffers(1)
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo)
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.nbytes, indices, GL_STATIC_DRAW)
+        count = indices.size
+
+    glBindVertexArray(0)
+    return Mesh(vao=vao, vbo=vbo, ebo=ebo, mode=mode, count=count, buffer_bytes=buffer_bytes)
+
+
+def ensure_vbo_capacity(mesh: Mesh, data: np.ndarray) -> None:
+    glBindBuffer(GL_ARRAY_BUFFER, mesh.vbo)
+    if data.nbytes != mesh.buffer_bytes:
+        glBufferData(GL_ARRAY_BUFFER, data.nbytes, None, GL_DYNAMIC_DRAW)
+        mesh.buffer_bytes = data.nbytes
+    if mesh.ebo is None:
+        mesh.count = data.shape[0]
+
+
+# --- Geometry Builders -----------------------------------------------------
+def build_wave_ribbon(samples: int) -> Mesh:
+    angles = np.linspace(0, 2 * np.pi, samples, endpoint=False)
+    base_radius = 1.25
+    half_width = 0.05
+
+    vertices = []
+    indices = []
+    for idx, ang in enumerate(angles):
+        dir_vec = np.array([math.cos(ang), 0.0, math.sin(ang)], dtype=np.float32)
+        left = np.array([-math.sin(ang), 0.0, math.cos(ang)], dtype=np.float32)
+        center = dir_vec * base_radius
+        top = center + left * half_width
+        bottom = center - left * half_width
+        normal = dir_vec
+        vertices.append(np.concatenate([top, normal]))
+        vertices.append(np.concatenate([bottom, normal]))
+        if idx < samples - 1:
+            b = idx * 2
+            indices.extend([b, b + 1, b + 2, b + 3])
+
+    return create_mesh(np.array(vertices, dtype=np.float32), np.array(indices, dtype=np.uint32), GL_TRIANGLE_STRIP)
+
+
+def build_spectrum_bars(bins: int) -> Mesh:
+    xs = np.linspace(-1.6, 1.6, bins)
+    bar_width = (xs[1] - xs[0]) * 0.55
+    vertices = []
+    indices = []
+    for i, x in enumerate(xs):
+        z = -1.35
+        normal = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        base = len(vertices)
+        vertices.append(np.concatenate([[x - bar_width, 0.0, z], normal]))
+        vertices.append(np.concatenate([[x + bar_width, 0.0, z], normal]))
+        vertices.append(np.concatenate([[x + bar_width, 0.1, z], normal]))
+        vertices.append(np.concatenate([[x - bar_width, 0.1, z], normal]))
+        indices.extend([base, base + 1, base + 2, base, base + 2, base + 3])
+
+    return create_mesh(np.array(vertices, dtype=np.float32), np.array(indices, dtype=np.uint32), GL_TRIANGLES)
+
+
+def build_spectrogram_grid(history: int, bins: int) -> Mesh:
+    t_axis = np.linspace(-3.0, 0.4, history)
+    f_axis = np.linspace(-1.6, 1.6, bins)
+    vertices = []
+    indices = []
+    for t_idx, t in enumerate(t_axis):
+        for f in f_axis:
+            pos = np.array([f, 0.0, t], dtype=np.float32)
+            normal = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+            vertices.append(np.concatenate([pos, normal]))
+
+    for t_idx in range(history - 1):
+        for f_idx in range(bins - 1):
+            v0 = t_idx * bins + f_idx
+            v1 = v0 + 1
+            v2 = v0 + bins
+            v3 = v2 + 1
+            indices.extend([v0, v2, v1, v1, v2, v3])
+
+    return create_mesh(np.array(vertices, dtype=np.float32), np.array(indices, dtype=np.uint32), GL_TRIANGLES)
+
+
+def build_particle_cloud(count: int = 2048) -> Mesh:
+    rng = np.random.default_rng(1)
+    radius = rng.uniform(0.4, 1.8, size=count)
+    theta = rng.uniform(0, 2 * np.pi, size=count)
+    height = rng.uniform(-0.5, 0.5, size=count)
+    positions = np.stack([
+        radius * np.cos(theta),
+        height,
+        radius * np.sin(theta),
+    ], axis=1).astype(np.float32)
+    normals = positions / (np.linalg.norm(positions, axis=1, keepdims=True) + 1e-6)
+    vertices = np.concatenate([positions, normals], axis=1)
+    return create_mesh(vertices.astype(np.float32), None, GL_POINTS)
+
+
+# --- Camera ----------------------------------------------------------------
+@dataclass
+class Camera:
+    distance: float = 4.0
+    height: float = 1.2
+    yaw: float = 0.0
+    pitch: float = -0.08
+    mode: str = "orbit"  # orbit | manual | lock
+
+    def update(self, keys: pyglet.window.key.KeyStateHandler, dt: float) -> None:
+        if self.mode == "orbit":
+            self.yaw += dt * 0.35
+        if keys[pyglet.window.key.LEFT]:
+            self.yaw -= dt * 1.2
+        if keys[pyglet.window.key.RIGHT]:
+            self.yaw += dt * 1.2
+        if keys[pyglet.window.key.UP]:
+            self.height += dt * 0.9
+        if keys[pyglet.window.key.DOWN]:
+            self.height -= dt * 0.9
+        self.height = max(-1.0, min(2.5, self.height))
+
+    def matrices(self, aspect: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        eye = np.array(
+            [self.distance * math.sin(self.yaw), self.height, self.distance * math.cos(self.yaw)],
+            dtype=np.float32,
+        )
+        center = np.array([0.0, 0.35, 0.0], dtype=np.float32)
+        up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        view = look_at(eye, center, up)
+        projection = perspective(50, aspect, 0.1, 100.0)
+        return eye, view, projection
+
+
+# --- Visual Elements -------------------------------------------------------
+class VisualElement:
+    def __init__(self, mesh: Mesh, color: Tuple[float, float, float]) -> None:
+        self.mesh = mesh
+        self.color = color
+
+    def update(self, *args) -> None:  # pragma: no cover - runtime visuals
+        raise NotImplementedError
+
+
+class WaveRibbon(VisualElement):
+    def __init__(self, mesh: Mesh, amplitude: float = 0.55) -> None:
+        super().__init__(mesh, (0.2, 0.95, 0.65))
+        self.amplitude = amplitude
+
+    def update(self, waveform: np.ndarray) -> float:
+        sample_count = waveform.size
+        angle_step = 2 * np.pi / sample_count
+        base_radius = 1.25
+        half_width = 0.05
+        mapped = np.empty((sample_count * 2, 6), dtype=np.float32)
+        for i in range(sample_count):
+            ang = i * angle_step
+            dir_vec = np.array([math.cos(ang), 0.0, math.sin(ang)], dtype=np.float32)
+            left = np.array([-math.sin(ang), 0.0, math.cos(ang)], dtype=np.float32)
+            radius = base_radius + waveform[i] * self.amplitude
+            center = dir_vec * radius
+            top = center + left * half_width
+            bottom = center - left * half_width
+            normal = dir_vec
+            mapped[2 * i, :3] = top
+            mapped[2 * i, 3:] = normal
+            mapped[2 * i + 1, :3] = bottom
+            mapped[2 * i + 1, 3:] = normal
+
+        ensure_vbo_capacity(self.mesh, mapped)
+        glBindBuffer(GL_ARRAY_BUFFER, self.mesh.vbo)
+        glBufferSubData(GL_ARRAY_BUFFER, 0, mapped.nbytes, mapped)
+        return float(np.max(np.abs(waveform)))
+
+
+class SpectrumBars(VisualElement):
+    def __init__(self, mesh: Mesh, scale: float = 1.4) -> None:
+        super().__init__(mesh, (0.95, 0.4, 0.2))
+        self.scale = scale
+
+    def update(self, spectrum: np.ndarray) -> float:
+        xs = np.linspace(-1.6, 1.6, spectrum.size)
+        bar_width = (xs[1] - xs[0]) * 0.55
+        vertices = []
+        normal = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        for x, value in zip(xs, spectrum):
+            height = 0.1 + value * self.scale
+            z = -1.35
+            vertices.append(np.concatenate([[x - bar_width, 0.0, z], normal]))
+            vertices.append(np.concatenate([[x + bar_width, 0.0, z], normal]))
+            vertices.append(np.concatenate([[x + bar_width, height, z], normal]))
+            vertices.append(np.concatenate([[x - bar_width, height, z], normal]))
+
+        data = np.array(vertices, dtype=np.float32)
+        ensure_vbo_capacity(self.mesh, data)
+        glBindBuffer(GL_ARRAY_BUFFER, self.mesh.vbo)
+        glBufferSubData(GL_ARRAY_BUFFER, 0, data.nbytes, data)
+        return float(np.mean(spectrum))
+
+
+class SpectrogramSurface(VisualElement):
+    def __init__(self, mesh: Mesh, analyzer: AudioAnalyzer, height_scale: float = 1.6) -> None:
+        super().__init__(mesh, (0.15, 0.5, 0.95))
+        self.analyzer = analyzer
+        self.height_scale = height_scale
+
+    def update(self) -> float:
+        history, bins = self.analyzer.spectrogram.shape
+        t_axis = np.linspace(-3.0, 0.4, history)
+        f_axis = np.linspace(-1.6, 1.6, bins)
+        vertices = np.empty((history * bins, 6), dtype=np.float32)
+        for t_idx, t in enumerate(t_axis):
+            for f_idx, f in enumerate(f_axis):
+                amplitude = self.analyzer.spectrogram[t_idx, f_idx]
+                height = amplitude * self.height_scale
+                pos = np.array([f, height, t], dtype=np.float32)
+                normal = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+                idx = t_idx * bins + f_idx
+                vertices[idx, :3] = pos
+                vertices[idx, 3:] = normal
+
+        ensure_vbo_capacity(self.mesh, vertices)
+        glBindBuffer(GL_ARRAY_BUFFER, self.mesh.vbo)
+        glBufferSubData(GL_ARRAY_BUFFER, 0, vertices.nbytes, vertices)
+        return float(np.max(self.analyzer.spectrogram))
+
+
+class ParticleField(VisualElement):
+    def __init__(self, mesh: Mesh) -> None:
+        super().__init__(mesh, (0.85, 0.9, 1.0))
+        self.intensity = 0.0
+
+    def update(self, spectrum: np.ndarray) -> float:
+        energy = float(np.mean(spectrum))
+        self.intensity = 0.9 * self.intensity + 0.1 * energy
+        return self.intensity
+
+
+# --- Visualizer ------------------------------------------------------------
+class SonicMorphVisualizer:
+    def __init__(self, width: int, height: int, audio_path: Optional[str]) -> None:
         self.width = width
         self.height = height
-        
-        # Sound parameters
         self.sample_rate = 44100
-        self.frequency = 440.0
-        self.amplitude = 0.5
-        self.energy = 0.0
-        self.morph_factor = 0.0
-        self.twist = 0.0
-        
-        # Shape parameters
-        self.shape_type = 0  # 0=sphere, 1=torus, 2=flower, 3=square, 4=spiral
-        self.shape_names = ["Sphere", "Torus", "Flower", "Square", "Spiral"]
-        self.auto_morph = True
-        self.morph_speed = 0.2
-        self.auto_rotate = True
-        self.rotation_speed = 0.5
-        
-        # Visual settings
-        self.resolution = 50  # Grid resolution
-        self.base_color = np.array([0.2, 0.7, 1.0], dtype=np.float32)
-        self.line_mode = False
-        
-        # Camera settings
-        self.camera_distance = 3.0
-        self.camera_height = 0.5
-        self.camera_angle = 0.0
-        self.update_camera_position()
-        
-        # Timing
-        self.start_time = time.time()
-        self.last_frame_time = self.start_time
-        self.fps = 0
-        self.frame_count = 0
-        
-        # Setup audio
-        self.setup_audio()
-        
-        # Create mesh geometry
-        self.create_mesh()
-        
-        # Initialize OpenGL
-        self.setup_display()
-        self.init_opengl()
-        
-        # Font for overlay
-        pygame.font.init()
-        self.font = pygame.font.SysFont('Arial', 18)
-        self.show_info = True
-    
-    def setup_display(self):
-        """Set up the Pygame display."""
-        self.display = (self.width, self.height)
-        self.screen = pygame.display.set_mode(self.display, DOUBLEBUF | OPENGL)
-        pygame.display.set_caption("Sound Shape Visualizer")
-    
-    def update_camera_position(self):
-        """Update camera position based on angle and distance."""
-        self.camera_position = np.array([
-            self.camera_distance * np.sin(self.camera_angle),
-            self.camera_height,
-            self.camera_distance * np.cos(self.camera_angle)
-        ], dtype=np.float32)
-        self.camera_target = np.array([0.0, 0.0, 0.0], dtype=np.float32)
-        self.camera_up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
-    
-    def create_mesh(self):
-        """Create a parametric grid for the shapes."""
-        # Create a grid of (u,v) coordinates in [0,1] range
-        u = np.linspace(0, 1, self.resolution, dtype=np.float32)
-        v = np.linspace(0, 1, self.resolution, dtype=np.float32)
-        
-        # Create vertices (u,v)
-        vertices = []
-        for i in range(self.resolution):
-            for j in range(self.resolution):
-                vertices.append([u[j], v[i]])
-        self.vertices = np.array(vertices, dtype=np.float32)
-        
-        # Create indices for triangle strips
-        indices = []
-        for i in range(self.resolution - 1):
-            for j in range(self.resolution):
-                # Add vertices for two triangles
-                indices.append(i * self.resolution + j)
-                indices.append((i + 1) * self.resolution + j)
-            
-            # Add a degenerate triangle if not the last strip
-            if i < self.resolution - 2:
-                indices.append((i + 1) * self.resolution + (self.resolution - 1))
-                indices.append((i + 1) * self.resolution)
-        
-        self.indices = np.array(indices, dtype=np.uint32)
-    
-    def init_opengl(self):
-        """Initialize OpenGL resources."""
-        # Compile shader program
-        try:
-            vertex_shader = compileShader(VERTEX_SHADER, GL_VERTEX_SHADER)
-            fragment_shader = compileShader(FRAGMENT_SHADER, GL_FRAGMENT_SHADER)
-            self.shader = compileProgram(vertex_shader, fragment_shader)
-        except Exception as e:
-            print(f"Shader compilation error: {e}")
-            import sys  # Make sure to import sys at the top of your file
-            sys.exit(1)
-            
-        # Create VAO and VBO
-        self.vao = glGenVertexArrays(1)
-        glBindVertexArray(self.vao)
-        
-        self.vbo = glGenBuffers(1)
-        glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
-        glBufferData(GL_ARRAY_BUFFER, self.vertices.nbytes, self.vertices, GL_STATIC_DRAW)
-        
-        position_loc = glGetAttribLocation(self.shader, "position")
-        glEnableVertexAttribArray(position_loc)
-        glVertexAttribPointer(position_loc, 2, GL_FLOAT, GL_FALSE, 0, None)
-        
-        # Setup index buffer
-        self.ebo = glGenBuffers(1)
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.ebo)
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, self.indices.nbytes, self.indices, GL_STATIC_DRAW)
-        
-        glBindBuffer(GL_ARRAY_BUFFER, 0)
-        glBindVertexArray(0)
-        
-        # Enable depth testing and blending
-        glEnable(GL_DEPTH_TEST)
-        glDepthFunc(GL_LESS)
-        glEnable(GL_BLEND)
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-    
-    def setup_audio(self):
-        """Initialize audio generation."""
-        pygame.mixer.init(frequency=self.sample_rate, size=-16, channels=1)
-        self.sound_playing = False
-        self.update_sound()
-    
-    def generate_waveform(self, freq, duration=1.0):
-        """Generate a waveform for audio playback."""
-        t = np.linspace(0, duration, int(self.sample_rate * duration), endpoint=False)
-        
-        # Create a complex waveform based on the current shape
-        if self.shape_type == 0:  # Sphere - pure sine wave
-            wave = self.amplitude * np.sin(2 * np.pi * freq * t)
-        elif self.shape_type == 1:  # Torus - add harmonics
-            wave = self.amplitude * np.sin(2 * np.pi * freq * t)
-            wave += 0.5 * self.amplitude * np.sin(2 * np.pi * freq * 2 * t)
-        elif self.shape_type == 2:  # Flower - add more harmonics with phase shifts
-            wave = self.amplitude * np.sin(2 * np.pi * freq * t)
-            wave += 0.3 * self.amplitude * np.sin(2 * np.pi * freq * 3 * t + 0.5)
-        elif self.shape_type == 3:  # Square - approximate square wave
-            wave = self.amplitude * np.sign(np.sin(2 * np.pi * freq * t))
-        elif self.shape_type == 4:  # Spiral - frequency sweep
-            wave = self.amplitude * np.sin(2 * np.pi * freq * t * (1 + 0.5 * t/duration))
-        else:
-            wave = self.amplitude * np.sin(2 * np.pi * freq * t)
-        
-        # Apply envelope to avoid clicks
-        envelope = np.ones_like(t)
-        attack = int(0.01 * self.sample_rate)
-        decay = int(0.05 * self.sample_rate)
-        
-        if attack > 0:
-            envelope[:attack] = np.linspace(0, 1, attack)
-        
-        if decay > 0 and decay < len(envelope):
-            decay_start = len(envelope) - decay
-            envelope[decay_start:] = np.linspace(1, 0, decay)
-        
-        wave = wave * envelope
-        
-        # Calculate energy for visualization
-        self.energy = np.mean(np.abs(wave)) * 2
-        
-        return (wave * 32767).astype(np.int16)
-    
-    def update_sound(self):
-        """Update the currently playing sound."""
-        try:
-            if self.sound_playing:
-                pygame.mixer.stop()
-            
-            wave_data = self.generate_waveform(self.frequency)
-            sound = pygame.mixer.Sound(buffer=wave_data)
-            sound.play(-1)  # Loop indefinitely
-            self.sound_playing = True
-        except Exception as e:
-            print(f"Sound error: {e}")
-            self.sound_playing = False
-    
-    def handle_input(self, delta_time):
-        """Process user input."""
-        keys = pygame.key.get_pressed()
-        
-        # Frequency controls
-        freq_change = 0
-        if keys[K_UP]:
-            freq_change = 10
-        elif keys[K_DOWN]:
-            freq_change = -10
-        
-        if freq_change != 0:
-            self.frequency = max(20, min(2000, self.frequency + freq_change))
-            self.update_sound()
-        
-        # Amplitude controls
-        amp_change = 0
-        if keys[K_PAGEUP]:
-            amp_change = 0.05
-        elif keys[K_PAGEDOWN]:
-            amp_change = -0.05
-        
-        if amp_change != 0:
-            self.amplitude = max(0.05, min(1.0, self.amplitude + amp_change))
-            self.update_sound()
-        
-        # Morph controls
-        morph_change = 0
-        if keys[K_m]:
-            morph_change = 0.01
-        elif keys[K_n]:
-            morph_change = -0.01
-        
-        if morph_change != 0:
-            self.morph_factor = max(0.0, min(1.0, self.morph_factor + morph_change))
-        
-        # Twist controls
-        twist_change = 0
-        if keys[K_t]:
-            twist_change = 0.1
-        elif keys[K_y]:
-            twist_change = -0.1
-        
-        if twist_change != 0:
-            self.twist = max(0.0, min(5.0, self.twist + twist_change))
-        
-        # Camera controls
-        if keys[K_LEFT]:
-            self.camera_angle += 0.05
-            self.update_camera_position()
-        elif keys[K_RIGHT]:
-            self.camera_angle -= 0.05
-            self.update_camera_position()
-        
-        if keys[K_w]:
-            self.camera_height += 0.05
-            self.update_camera_position()
-        elif keys[K_s]:
-            self.camera_height -= 0.05
-            self.update_camera_position()
-        
-        if keys[K_a]:
-            self.camera_distance -= 0.05
-            self.update_camera_position()
-        elif keys[K_d]:
-            self.camera_distance += 0.05
-            self.update_camera_position()
-    
-    def update(self, delta_time):
-        """Update the visualization state."""
-        # Auto-rotate camera if enabled
-        if self.auto_rotate:
-            self.camera_angle += delta_time * self.rotation_speed
-            self.update_camera_position()
-        
-        # Auto-morph between shapes if enabled
-        if self.auto_morph:
-            self.morph_factor += delta_time * self.morph_speed
-            if self.morph_factor >= 1.0:
-                self.morph_factor = 0.0
-                self.shape_type = (self.shape_type + 1) % len(self.shape_names)
-                self.update_sound()  # Update sound to match new shape
-    
-    def render(self):
-        """Render the visualization."""
-        # Clear the frame
-        glClearColor(0.05, 0.05, 0.1, 1.0)
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
-        
-        # Use shader program
-        glUseProgram(self.shader)
-        
-        # Set uniforms
-        current_time = time.time() - self.start_time
-        
-        time_loc = glGetUniformLocation(self.shader, "time")
-        glUniform1f(time_loc, current_time)
-        
-        freq_loc = glGetUniformLocation(self.shader, "frequency")
-        glUniform1f(freq_loc, self.frequency / 440.0)
-        
-        amp_loc = glGetUniformLocation(self.shader, "amplitude")
-        glUniform1f(amp_loc, self.amplitude)
-        
-        shape_loc = glGetUniformLocation(self.shader, "shapeType")
-        glUniform1i(shape_loc, self.shape_type)
-        
-        morph_loc = glGetUniformLocation(self.shader, "morphFactor")
-        glUniform1f(morph_loc, self.morph_factor)
-        
-        twist_loc = glGetUniformLocation(self.shader, "twist")
-        glUniform1f(twist_loc, self.twist)
-        
-        energy_loc = glGetUniformLocation(self.shader, "energy")
-        glUniform1f(energy_loc, self.energy)
-        
-        color_loc = glGetUniformLocation(self.shader, "baseColor")
-        glUniform3fv(color_loc, 1, self.base_color)
-        
-        # Set view matrix
-        view = lookAt(self.camera_position, self.camera_target, self.camera_up)
-        view_loc = glGetUniformLocation(self.shader, "view")
-        glUniformMatrix4fv(view_loc, 1, GL_TRUE, view)
-        
-        # Set projection matrix
-        projection = perspective(45, self.width / self.height, 0.1, 100)
-        proj_loc = glGetUniformLocation(self.shader, "projection")
-        glUniformMatrix4fv(proj_loc, 1, GL_TRUE, projection)
-        
-        # Set model matrix (identity for now)
+        self.audio_stream = AudioStream(sample_rate=self.sample_rate, source_path=audio_path)
+        self.analyzer = AudioAnalyzer(sample_rate=self.sample_rate)
+
+        self.window = pyglet.window.Window(
+            width=self.width,
+            height=self.height,
+            caption="SonicMorph – Advanced Audio Geometry",
+            config=pyglet.gl.Config(double_buffer=True, depth_size=24, major_version=3, minor_version=3),
+            resizable=False,
+        )
+        self.window.push_handlers(self)
+        self.keys = pyglet.window.key.KeyStateHandler()
+        self.window.push_handlers(self.keys)
+
+        self.shader = Shader()
+        self.camera = Camera()
+
+        self.wave_mesh = build_wave_ribbon(1024)
+        self.spectrum_mesh = build_spectrum_bars(self.analyzer.spectrum_bins)
+        self.spectrogram_mesh = build_spectrogram_grid(self.analyzer.history, self.analyzer.spectrum_bins)
+        self.particle_mesh = build_particle_cloud()
+
+        self.wave = WaveRibbon(self.wave_mesh)
+        self.spectrum = SpectrumBars(self.spectrum_mesh)
+        self.spectrogram = SpectrogramSurface(self.spectrogram_mesh, self.analyzer)
+        self.particles = ParticleField(self.particle_mesh)
+
+        self.modes = ["waveform", "spectrum", "spectrogram", "particles", "all"]
+        self.active_mode = "all"
+        self.accent = 0.0
+        self.last_time = time.time()
+
+        pyglet.clock.schedule_interval(self._tick, 1 / 60.0)
+
+    # -- Lifecycle -----------------------------------------------------
+    def _tick(self, dt: float) -> None:
+        now = time.time()
+        delta = now - self.last_time
+        self.last_time = now
+
+        self.camera.update(self.keys, delta)
+        samples = self.audio_stream.next_chunk(2048)
+        waveform, spectrum, rms = self.analyzer.analyze(samples)
+
+        accent_wave = self.wave.update(waveform)
+        accent_spec = self.spectrum.update(spectrum)
+        accent_specgram = self.spectrogram.update()
+        accent_particles = self.particles.update(spectrum)
+
+        self.accent = max(accent_wave, accent_spec, accent_specgram, accent_particles, rms)
+        self.window.invalid = True
+
+    # -- Rendering -----------------------------------------------------
+    def _render_mesh(self, element: VisualElement, view: np.ndarray, projection: np.ndarray, point_size: float = 3.5) -> None:
+        mesh = element.mesh
+        self.shader.use()
         model = np.eye(4, dtype=np.float32)
-        model_loc = glGetUniformLocation(self.shader, "model")
-        glUniformMatrix4fv(model_loc, 1, GL_TRUE, model)
-        
-        # Draw the shape
-        glBindVertexArray(self.vao)
-        
-        if self.line_mode:
-            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
+        self.shader.uniform_matrix("model", model)
+        self.shader.uniform_matrix("view", view)
+        self.shader.uniform_matrix("projection", projection)
+        self.shader.uniform_vec3("color", element.color)
+        self.shader.uniform_vec3("lightPos", (2.6, 2.7, 2.4))
+        self.shader.uniform_vec3("viewPos", (0.0, 0.0, 5.0))
+        self.shader.uniform_float("timeSec", float(time.time()))
+        self.shader.uniform_float("accent", float(self.accent))
+
+        glBindVertexArray(mesh.vao)
+        if mesh.mode == GL_POINTS:
+            glEnable(GL_PROGRAM_POINT_SIZE)
+            glPointSize(point_size + self.accent * 4.0)
+        if mesh.ebo is not None:
+            glDrawElements(mesh.mode, mesh.count, GL_UNSIGNED_INT, None)
         else:
-            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
-        
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.ebo)
-        glDrawElements(GL_TRIANGLE_STRIP, len(self.indices), GL_UNSIGNED_INT, None)
+            glDrawArrays(mesh.mode, 0, mesh.count)
         glBindVertexArray(0)
-        
-        # Reset polygon mode
-        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
-        
-        # Render overlay if enabled
-        if self.show_info:
-            self.render_overlay()
-    
-    def render_overlay(self):
-        """Render text overlay with information."""
-        # Switch to 2D rendering
-        glUseProgram(0)
-        glMatrixMode(GL_PROJECTION)
-        glPushMatrix()
-        glLoadIdentity()
-        glOrtho(0, self.width, self.height, 0, -1, 1)
-        glMatrixMode(GL_MODELVIEW)
-        glPushMatrix()
-        glLoadIdentity()
-        glDisable(GL_DEPTH_TEST)
-        
-        # Draw text
-        self.draw_text(10, 10, f"FPS: {self.fps:.1f}")
-        self.draw_text(10, 30, f"Shape: {self.shape_names[self.shape_type]}")
-        self.draw_text(10, 50, f"Frequency: {self.frequency:.1f} Hz")
-        self.draw_text(10, 70, f"Amplitude: {self.amplitude:.2f}")
-        self.draw_text(10, 90, f"Morph: {self.morph_factor:.2f}")
-        self.draw_text(10, 110, f"Twist: {self.twist:.1f}")
-        
-        # Controls help
-        y_pos = self.height - 140
-        self.draw_text(10, y_pos, "Controls:")
-        self.draw_text(10, y_pos + 20, "↑/↓: Frequency, PgUp/PgDn: Amplitude")
-        self.draw_text(10, y_pos + 40, "M/N: Manual morphing, T/Y: Twist")
-        self.draw_text(10, y_pos + 60, "WASD: Camera movement, ←/→: Rotate camera")
-        self.draw_text(10, y_pos + 80, "Space: Toggle sound, L: Toggle line mode")
-        self.draw_text(10, y_pos + 100, "A: Toggle auto-morph, R: Toggle auto-rotate")
-        
-        # Restore 3D rendering
+
+    def on_draw(self) -> None:  # pragma: no cover - runtime visuals
         glEnable(GL_DEPTH_TEST)
-        glMatrixMode(GL_PROJECTION)
-        glPopMatrix()
-        glMatrixMode(GL_MODELVIEW)
-        glPopMatrix()
-    
-    def draw_text(self, x, y, text, color=(255, 255, 255)):
-        """Draw text on the screen."""
-        try:
-            text_surface = self.font.render(text, True, color)
-            text_data = pygame.image.tostring(text_surface, "RGBA", True)
-            width, height = text_surface.get_size()
-            
-            glEnable(GL_BLEND)
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-            glRasterPos2d(x, y)
-            glDrawPixels(width, height, GL_RGBA, GL_UNSIGNED_BYTE, text_data)
-            glDisable(GL_BLEND)
-        except Exception as e:
-            print(f"Text rendering error: {e}")
-    
-    def update_fps(self):
-        """Calculate and update FPS."""
-        current_time = time.time()
-        delta_time = current_time - self.last_frame_time
-        self.last_frame_time = current_time
-        
-        self.frame_count += 1
-        if current_time - self.start_time >= 1.0:
-            self.fps = self.frame_count / (current_time - self.start_time)
-            self.frame_count = 0
-            self.start_time = current_time
-        
-        return delta_time
-    
-    def run(self):
-        """Main application loop."""
-        clock = pygame.time.Clock()
-        running = True
-        
-        while running:
-            delta_time = self.update_fps()
-            
-            # Handle events
-            for event in pygame.event.get():
-                if event.type == QUIT:
-                    running = False
-                elif event.type == KEYDOWN:
-                    if event.key == K_ESCAPE:
-                        running = False
-                    elif event.key == K_SPACE:
-                        if self.sound_playing:
-                            pygame.mixer.stop()
-                            self.sound_playing = False
-                        else:
-                            self.update_sound()
-                    elif event.key == K_h:
-                        self.show_info = not self.show_info
-                    elif event.key == K_l:
-                        self.line_mode = not self.line_mode
-                    elif event.key == K_a:
-                        self.auto_morph = not self.auto_morph
-                    elif event.key == K_r:
-                        self.auto_rotate = not self.auto_rotate
-                    elif event.key == K_TAB:
-                        # Manually change shape
-                        self.shape_type = (self.shape_type + 1) % len(self.shape_names)
-                        self.morph_factor = 0.0
-                        self.update_sound()
-            
-            # Process continuous input
-            self.handle_input(delta_time)
-            
-            # Update state
-            self.update(delta_time)
-            
-            # Render the scene
-            self.render()
-            
-            # Swap buffers
-            pygame.display.flip()
-            
-            # Control frame rate
-            clock.tick(60)
-        
-        # Clean up
-        if self.sound_playing:
-            pygame.mixer.stop()
-        pygame.quit()
+        glClearColor(0.015, 0.018, 0.035, 1.0)
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+
+        eye, view, projection = self.camera.matrices(self.width / self.height)
+
+        if self.active_mode in ("waveform", "all"):
+            self._render_mesh(self.wave, view, projection)
+        if self.active_mode in ("spectrum", "all"):
+            self._render_mesh(self.spectrum, view, projection)
+        if self.active_mode in ("spectrogram", "all"):
+            self._render_mesh(self.spectrogram, view, projection)
+        if self.active_mode in ("particles", "all"):
+            self._render_mesh(self.particles, view, projection, point_size=2.7)
+
+    # -- Input ---------------------------------------------------------
+    def on_key_press(self, symbol: int, modifiers: int) -> None:  # pragma: no cover - runtime visuals
+        if symbol == pyglet.window.key.ESCAPE:
+            pyglet.app.exit()
+            return
+        if symbol == pyglet.window.key.C:
+            next_mode = {"orbit": "manual", "manual": "lock", "lock": "orbit"}
+            self.camera.mode = next_mode.get(self.camera.mode, "orbit")
+        if symbol == pyglet.window.key.M:
+            idx = self.modes.index(self.active_mode)
+            self.active_mode = self.modes[(idx + 1) % len(self.modes)]
+        if symbol == pyglet.window.key.PLUS or symbol == pyglet.window.key.NUM_ADD:
+            self.audio_stream.adjust_frequency(20.0)
+        if symbol == pyglet.window.key.MINUS or symbol == pyglet.window.key.NUM_SUBTRACT:
+            self.audio_stream.adjust_frequency(-20.0)
+
+    # -- Run -----------------------------------------------------------
+    def run(self) -> None:
+        pyglet.app.run()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="SonicMorph – high-end 3D audio visualization")
+    parser.add_argument("--audio", type=str, default=None, help="Path to WAV file; otherwise uses manual tone")
+    args = parser.parse_args()
+
+    visualizer = SonicMorphVisualizer(1280, 800, args.audio)
+    visualizer.run()
+
 
 if __name__ == "__main__":
-    pygame.init()
-    visualizer = SoundShapeVisualizer(width=1024, height=768)
-    visualizer.run()
+    main()
